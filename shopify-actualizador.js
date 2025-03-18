@@ -58,7 +58,7 @@ async function updatePricesFromLocalAPI() {
     console.log("Iniciando actualización de precios...");
     
     // Obtenemos los datos locales desde la API
-    const response = await axios.get(process.env.DATA_API_URL, { timeout: 10000 });
+    const response = await axios.get(process.env.DATA_API_URL, { timeout: 1000000 });
     const localProducts = response.data.value || response.data;
     
     console.log(`Se encontraron ${localProducts.length} productos para procesar.`);
