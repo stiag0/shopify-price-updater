@@ -374,13 +374,46 @@ async function getLocalInventory() {
     const inventoryData = response.data.value || response.data;
     Logger.log(`Se encontraron ${inventoryData.length} registros de inventario local.`);
     
-    // Crear un mapa de inventario indexado por código de producto
-    const inventoryMap = {};
+    // Agrupar los registros de inventario por SKU
+    const inventoryBySku = {};
     for (const item of inventoryData) {
       const sku = cleanSku(item.CodigoProducto);
-      if (!inventoryMap[sku] || new Date(item.Fecha) > new Date(inventoryMap[sku].Fecha)) {
-        inventoryMap[sku] = item;
+      if (!inventoryBySku[sku]) {
+        inventoryBySku[sku] = [];
       }
+      inventoryBySku[sku].push(item);
+    }
+    
+    // Crear un mapa de inventario indexado por código de producto
+    // calculando correctamente el inventario actual
+    const inventoryMap = {};
+    for (const [sku, items] of Object.entries(inventoryBySku)) {
+      // Ordenar los registros por fecha, del más reciente al más antiguo
+      const sortedItems = items.sort((a, b) => new Date(b.Fecha) - new Date(a.Fecha));
+      
+      // Tomar el registro más reciente
+      const mostRecentItem = sortedItems[0];
+      
+      // Calcular la cantidad real utilizando CantidadInicial + CantidadEntradas - CantidadSalidas
+      const cantidadInicial = parseFloat(mostRecentItem.CantidadInicial || 0);
+      const cantidadEntradas = parseFloat(mostRecentItem.CantidadEntradas || 0);
+      const cantidadSalidas = parseFloat(mostRecentItem.CantidadSalidas || 0);
+      
+      // Calcular la cantidad actual
+      const cantidadCalculada = Math.max(0, cantidadInicial + cantidadEntradas - cantidadSalidas);
+      
+      // Crear un objeto que incluya el ítem original pero con la cantidad calculada
+      const inventoryItem = {
+        ...mostRecentItem,
+        CantidadActualCalculada: cantidadCalculada
+      };
+      
+      // Log detallado para depuración (solo para algunos productos al azar)
+      if (Math.random() < 0.05) { // Log ~5% de los productos para no saturar el log
+        Logger.log(`Inventario para SKU ${sku}: Inicial=${cantidadInicial}, Entradas=${cantidadEntradas}, Salidas=${cantidadSalidas}, Calculado=${cantidadCalculada}, Original=${mostRecentItem.CantidadActual || 0}`);
+      }
+      
+      inventoryMap[sku] = inventoryItem;
     }
     
     Logger.log(`Inventario procesado para ${Object.keys(inventoryMap).length} productos únicos.`);
@@ -675,7 +708,7 @@ async function updateProductBySku(sku, localProduct, inventoryData = null) {
     // Obtener el nuevo precio y cantidad de inventario
     const newPrice = localProduct ? parseFloat(localProduct.Venta1).toFixed(2) : null;
     const inventoryQty = inventoryData ? 
-      Math.max(0, Math.floor(parseFloat(inventoryData.CantidadActual || 0))) : 
+      Math.max(0, Math.floor(parseFloat(inventoryData.CantidadActualCalculada || 0))) : 
       null;
     
     // Actualizar la variante en Shopify
@@ -743,7 +776,7 @@ async function syncLocalDataToShopify() {
           
           // Obtener el nuevo precio y cantidad de inventario
           const newPrice = parseFloat(localProduct.Venta1).toFixed(2);
-          const inventoryQty = inventoryData ? Math.max(0, parseFloat(inventoryData.CantidadActual)) : null;
+          const inventoryQty = inventoryData ? Math.max(0, parseFloat(inventoryData.CantidadActualCalculada)) : null;
           
           // Actualizar la variante en Shopify
           const result = await updateVariantInShopify(
@@ -794,7 +827,7 @@ async function syncLocalDataToShopify() {
           // Obtener el nuevo precio y la cantidad de inventario
           const newPrice = parseFloat(localProd.Venta1).toFixed(2);
           const inventoryData = localInventory[cleanedSku];
-          const inventoryQty = inventoryData ? Math.max(0, parseFloat(inventoryData.CantidadActual)) : null;
+          const inventoryQty = inventoryData ? Math.max(0, parseFloat(inventoryData.CantidadActualCalculada)) : null;
           
           // Actualizar la variante en Shopify
           const result = await updateVariantInShopify(
