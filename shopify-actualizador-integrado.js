@@ -635,11 +635,15 @@ async function updateVariantInShopify(variant, newPrice, newInventory) {
     // Crear la mutación para ajustar el inventario
     const inventoryMutation = `
       mutation {
-        inventoryAdjustQuantity(input: {
-          inventoryLevelId: "${variant.inventoryItem.id}",
-          availableDelta: ${newInventory - variant.inventoryQuantity}
-        }) {
-          inventoryLevel {
+        inventoryBulkAdjust(
+          inventoryItemAdjustments: [
+            {
+              inventoryItemId: "${variant.inventoryItem.id}",
+              availableDelta: ${newInventory - variant.inventoryQuantity}
+            }
+          ]
+        ) {
+          inventoryLevels {
             available
           }
           userErrors {
@@ -667,7 +671,7 @@ async function updateVariantInShopify(variant, newPrice, newInventory) {
       return { success: false, error: inventoryResult.errors };
     }
     
-    const invUserErrors = inventoryResult.data.inventoryAdjustQuantity.userErrors;
+    const invUserErrors = inventoryResult.data.inventoryBulkAdjust.userErrors;
     if (invUserErrors.length > 0) {
       Logger.error(`Errores al actualizar el inventario ${sku}:`, { message: JSON.stringify(invUserErrors) });
       return { success: false, error: invUserErrors };
