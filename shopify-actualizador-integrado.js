@@ -13,7 +13,7 @@ const readline = require('readline');
 // MAX_RETRIES=3 (opcional, valor predeterminado: 3)
 // LOG_FILE_PATH=logs/shopify-sync.log (opcional, ruta del archivo de log)
 // LOG_MAX_SIZE=100 (opcional, tamaño máximo en MB)
-// SYNC_MODE=local_first (opcional, 'local_first' o 'shopify_first', predeterminado: 'local_first')
+// SYNC_MODE=shopify_first (opcional, 'local_first' o 'shopify_first', predeterminado: 'shopify_first')
 // SYNC_TYPE=both (opcional, 'price', 'inventory', 'both', predeterminado: 'both')
 
 const SHOPIFY_API_URL = `https://${process.env.SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/2023-10/graphql.json`;
