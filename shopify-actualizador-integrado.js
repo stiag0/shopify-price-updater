@@ -20,7 +20,7 @@ const SHOPIFY_API_URL = `https://${process.env.SHOPIFY_SHOP_NAME}.myshopify.com/
 const MAX_RETRIES = process.env.MAX_RETRIES || 3;
 const LOG_FILE_PATH = process.env.LOG_FILE_PATH || 'logs/shopify-sync.log';
 const LOG_MAX_SIZE = (process.env.LOG_MAX_SIZE || 100) * 1024 * 1024; // Convertir MB a bytes
-const SYNC_MODE = process.env.SYNC_MODE || 'local_first'; // 'local_first' o 'shopify_first'
+const SYNC_MODE = process.env.SYNC_MODE || 'shopify_first'; // 'local_first' o 'shopify_first'
 const SYNC_TYPE = process.env.SYNC_TYPE || 'both'; // 'price', 'inventory', 'both'
 
 /**
