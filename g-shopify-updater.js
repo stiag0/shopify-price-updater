@@ -30,7 +30,7 @@ const {
 } = process.env;
 
 // --- Constants and Defaults ---
-const SHOPIFY_API_VERSION = '2024-04'; // Use a recent, stable API version
+const SHOPIFY_API_VERSION = '2025-04'; // Use a recent, stable API version
 const SHOPIFY_GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const LOG_FILE_PATH = process.env.LOG_FILE_PATH || path.join('logs', 'shopify-sync.log');
