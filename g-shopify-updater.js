@@ -427,12 +427,12 @@ const Logger = {
  * @returns {string | null} - The cleaned SKU or null if input is invalid.
  */
 function cleanSku(sku) {
-    if (sku === null || sku === undefined) return null;
-    // Keep alphanumeric and possibly dashes/underscores if they are part of your SKU format
-    // Example: /[^a-zA-Z0-9\-\_]/g to keep letters, numbers, dashes, underscores
+    if (sku === null || sku === undefined) return null; // Devuelve null para inválidos
     try {
-        const cleaned = String(sku).trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); // Keep only uppercase letters and numbers
-        return cleaned.length > 0 ? cleaned : null; // Return null if cleaning results in empty string
+        // Limpia conservando SOLO números y quitando ceros a la izquierda
+        const cleaned = String(sku).trim().replace(/[^0-9]/g, '').replace(/^0+/, '');
+        // Devuelve null si queda vacío, o el número limpio como string
+        return cleaned.length > 0 ? cleaned : null;
     } catch (e) {
         Logger.error(`Error cleaning SKU: ${sku}`, e);
         return null;
