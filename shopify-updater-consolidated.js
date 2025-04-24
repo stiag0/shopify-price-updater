@@ -17,7 +17,7 @@ const {
 } = process.env;
 
 // --- Constants and Defaults ---
-const SHOPIFY_API_VERSION = '2025-04'; // Use a current supported API version
+const SHOPIFY_API_VERSION = '2025-01'; // Use a current supported API version
 const SHOPIFY_GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const LOG_FILE_PATH = process.env.LOG_FILE_PATH || path.join('logs', 'shopify-sync.log');
@@ -205,7 +205,7 @@ const Logger = {
         }
     }
 };
-
+Logger.init();
 /**
  * Cleans a SKU: Keeps ONLY numbers, removes leading zeros.
  * Returns null if input is invalid or result is empty.
@@ -360,7 +360,6 @@ async function getAllShopifyVariants() {
     let pageCount = 0;
     const MAX_PAGES = 500; // Safeguard against infinite loops
 
-    // Updated GraphQL query that works with both 2024 and 2025 API versions
     // For 2025-01+, it retrieves quantities
     // For older versions, it retrieves available
     const queryTemplate = (cursor) => `
@@ -379,7 +378,6 @@ async function getAllShopifyVariants() {
                 inventoryLevels(first: 1) {
                   edges {
                     node {
-                      available
                       quantities(names: "available") {
                         name
                         quantity
@@ -506,13 +504,12 @@ async function updateVariantInShopify(variant, newPrice, newInventory) {
     if (inventoryLevelEdge?.quantities?.length > 0) {
         const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
         currentInventory = availableObj?.quantity;
-        Logger.debug(`Found inventory using quantities field: ${currentInventory}`);
-    } 
-    // Fall back to available field if quantities is not available
-    else if (inventoryLevelEdge?.available !== undefined) {
-        currentInventory = inventoryLevelEdge.available;
-        Logger.debug(`Found inventory using available field: ${currentInventory}`);
+        Logger.debug(`Read inventory using quantities field: ${currentInventory}`);
+    } else {
+        Logger.debug(`Could not find inventory quantity in 'quantities' field for SKU ${variant.sku}.`);
+        // currentInventory remains null
     }
+
 
     const productName = variant.product?.title || 'Unknown Product';
     const sku = variant.sku || 'No SKU';
@@ -593,84 +590,36 @@ async function updateVariantInShopify(variant, newPrice, newInventory) {
             Logger.warn(`SKU ${sku} (${productName}) inventory is not tracked by Shopify. Skipping inventory update.`);
             messages.push("Inventory not tracked.");
         } else {
-            // Use inventoryAdjustQuantity mutation
+            if (currentInventoryNum === null) { Logger.warn(`SKU ${sku} (${productName}): Could not determine current inventory level from fetched data. Proceeding with update using Adjust, but comparison is skipped.`); }
             Logger.log(`Updating inventory for SKU ${sku} (${productName}) using Adjust: ${currentInventoryNum ?? 'N/A'} -> ${newInventoryNum}`);
             const delta = newInventoryNum - (currentInventoryNum ?? 0);
-
-            if (delta === 0) {
-                messages.push("Inventory delta is 0, skipping adjust call.");
-            } else {
-                // Updated mutation to support both API versions by requesting both quantities and available
-                const inventoryMutation = `
-                  mutation InventoryAdjustQuantity($input: InventoryAdjustQuantityInput!) {
-                    inventoryAdjustQuantity(input: $input) {
-                      inventoryLevel {
-                        available
-                        quantities(names: "available") {
-                          name
-                          quantity
-                        }
-                      }
-                      userErrors {
-                        field
-                        message
-                      }
-                    }
-                  }`;
-                const inventoryVariables = { 
-                    input: { 
-                        inventoryItemId: inventoryItemId, 
-                        availableDelta: delta 
-                    } 
-                };
-                
+            if (delta === 0) { messages.push("Inventory delta is 0, skipping adjust call."); }
+            else {
+                // **MODIFIED MUTATION:** Removed 'quantities' request from response as it might cause issues on older APIs if 'available' was also removed there.
+                // We rely on the 'available' field in the response which seems more consistent across versions for inventoryAdjustQuantity.
+                 const inventoryMutation = `
+                   mutation InventoryAdjustQuantity($input: InventoryAdjustQuantityInput!) {
+                     inventoryAdjustQuantity(input: $input) {
+                       inventoryLevel {
+                         available # Rely on available field in response
+                       }
+                       userErrors {
+                         field
+                         message
+                       }
+                     }
+                   }`;
+                const inventoryVariables = { input: { inventoryItemId: inventoryItemId, availableDelta: delta } };
                 try {
-                    const result = await fetchWithRetry({
-                        method: 'POST',
-                        url: SHOPIFY_GRAPHQL_URL,
-                        headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN },
-                        data: JSON.stringify({ query: inventoryMutation, variables: inventoryVariables }),
-                    }, true);
-
-                    const adjustResult = result?.data?.inventoryAdjustQuantity;
-                    const userErrors = adjustResult?.userErrors;
-
-                    if (userErrors && userErrors.length > 0) {
-                        const errorMsg = `Inventory update failed: ${userErrors.map(e => `(${e.field}) ${e.message}`).join(', ')}`;
-                        Logger.error(`Error adjusting inventory for SKU ${sku}: ${JSON.stringify(userErrors)}`);
-                        messages.push(errorMsg);
-                        errors.push(errorMsg);
-                    } else if (adjustResult?.inventoryLevel) {
-                        // Get final quantity from either quantities or available field
-                        let finalAvailable = null;
-                        const quantities = adjustResult.inventoryLevel.quantities;
-                        
-                        if (quantities && quantities.length > 0) {
-                            const availableObj = quantities.find(q => q.name === 'available');
-                            finalAvailable = availableObj?.quantity;
-                        }
-                        
-                        // Fall back to available field if quantities is not available
-                        if (finalAvailable === null && adjustResult.inventoryLevel.available !== undefined) {
-                            finalAvailable = adjustResult.inventoryLevel.available;
-                        }
-
-                        Logger.log(`✅ Inventory adjusted successfully for SKU ${sku}. New available: ${finalAvailable}`, 'SUCCESS');
-                        updatedInventory = true;
-                        messages.push(`Inventory: ${currentInventoryNum ?? 'N/A'} -> ${newInventoryNum} (Delta: ${delta}, Final: ${finalAvailable})`);
-                        
-                        if (finalAvailable !== newInventoryNum) {
-                            Logger.warn(`SKU ${sku}: Final inventory level (${finalAvailable}) differs from expected (${newInventoryNum}) after adjustment.`);
-                        }
-                    } else {
-                        Logger.warn(`Unknown result structure after inventory adjust for SKU ${sku}: ${JSON.stringify(result)}`);
-                        messages.push("Inventory update status unknown.");
-                    }
-                } catch (error) {
-                    const errorMsg = `Inventory update failed: API error during mutation.`;
-                    messages.push(errorMsg);
-                    errors.push(errorMsg);
-                }
+                    const result = await fetchWithRetry({ method: 'POST', url: SHOPIFY_GRAPHQL_URL, headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN }, data: JSON.stringify({ query: inventoryMutation, variables: inventoryVariables }) }, true);
+                    const adjustResult = result?.data?.inventoryAdjustQuantity; const userErrors = adjustResult?.userErrors;
+                    if (userErrors && userErrors.length > 0) { const errorMsg = `Inventory update failed: ${userErrors.map(e => `(${e.field}) ${e.message}`).join(', ')}`; Logger.error(`Error adjusting inventory for SKU ${sku}: ${JSON.stringify(userErrors)}`); messages.push(errorMsg); errors.push(errorMsg); }
+                    else if (adjustResult?.inventoryLevel?.available !== undefined) { // Check 'available' in response
+                         const finalAvailable = adjustResult.inventoryLevel.available;
+                         Logger.log(`✅ Inventory adjusted successfully for SKU ${sku}. New available: ${finalAvailable}`, 'SUCCESS'); updatedInventory = true; messages.push(`Inventory: ${currentInventoryNum ?? 'N/A'} -> ${newInventoryNum} (Delta: ${delta}, Final: ${finalAvailable})`);
+                         if (finalAvailable !== newInventoryNum) { Logger.warn(`SKU ${sku}: Final inventory level (${finalAvailable}) differs from expected (${newInventoryNum}) after adjustment.`); }
+                    } else { Logger.warn(`Unknown result structure after inventory adjust for SKU ${sku} (missing inventoryLevel.available?): ${JSON.stringify(result)}`); messages.push("Inventory update status unknown."); }
+                } catch (error) { const errorMsg = `Inventory update failed: API error during mutation.`; messages.push(errorMsg); errors.push(errorMsg); }
             }
         }
     } else if (shouldUpdateInventory && newInventoryNum !== null) {
@@ -927,7 +876,7 @@ async function syncShopifyData() {
 
 // --- Main Execution ---
 (async () => {
-    Logger.init();
+    
     Logger.log(`Script started at ${new Date().toLocaleString()}`);
     await syncShopifyData();
 })();
