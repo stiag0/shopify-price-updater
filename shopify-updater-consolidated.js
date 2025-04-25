@@ -17,7 +17,7 @@ const {
 } = process.env;
 
 // --- Constants and Defaults ---
-const SHOPIFY_API_VERSION = '2025-01'; // Use a current supported API version
+const SHOPIFY_API_VERSION = '2024-10'; // Use a current supported API version
 const SHOPIFY_GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const LOG_FILE_PATH = process.env.LOG_FILE_PATH || path.join('logs', 'shopify-sync.log');
@@ -477,20 +477,71 @@ async function getAllShopifyVariants() {
 }
 
 /**
+ * **NUEVO:** Fetches the GID of the first active inventory location.
+ * @returns {Promise<string|null>} The location GID (e.g., "gid://shopify/Location/123") or null if none found/error.
+ */
+async function getActiveLocationId() {
+    Logger.log("Fetching active inventory location ID...");
+    const query = `
+      query GetActiveLocation {
+        locations(first: 1, query: "status:active") { # Query for active locations
+          edges {
+            node {
+              id
+              name
+            }
+          }
+        }
+      }
+    `;
+    try {
+        const responseData = await fetchWithRetry({
+            method: 'POST',
+            url: SHOPIFY_GRAPHQL_URL,
+            headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN },
+            data: JSON.stringify({ query }),
+        }, true); // Use limiter, it's an API call
+
+        if (responseData.errors) {
+            Logger.error(`GraphQL Error fetching location ID: ${JSON.stringify(responseData.errors)}`);
+            return null;
+        }
+
+        const locationEdge = responseData?.data?.locations?.edges?.[0];
+        if (locationEdge?.node?.id) {
+            Logger.log(`Found active location: ${locationEdge.node.name} (ID: ${locationEdge.node.id})`);
+            return locationEdge.node.id;
+        } else {
+            Logger.error("No active inventory location found for this store.");
+            return null;
+        }
+    } catch (error) {
+        Logger.error("Failed API call fetching location ID", error);
+        return null;
+    }
+}
+
+
+/**
  * Updates price and/or inventory for a specific variant in Shopify.
  * Handles both 2025-01+ API (quantities) and earlier API versions (available).
  * 
  * @param {object} variant - The Shopify variant object.
  * @param {string|null} newPrice - The new price or null to skip update.
  * @param {number|null} newInventory - The absolute inventory quantity or null to skip update.
+ * @param {string} locationId - The GID of the inventory location to update.
  * @returns {Promise<object>} - Result object with success status and update info.
  */
-async function updateVariantInShopify(variant, newPrice, newInventory) {
+async function updateVariantInShopify(variant, newPrice, newInventory, locationId) {
     // Input Validation
     if (!variant || !variant.id || !variant.inventoryItem?.id) {
         Logger.error("Invalid variant object passed to updateVariantInShopify", variant);
         return { success: false, updatedPrice: false, updatedInventory: false, message: "Invalid variant data received", error: "Invalid variant data" };
     }
+    if (!locationId && (SYNC_TYPE === 'inventory' || SYNC_TYPE === 'both')) {
+        Logger.error(`SKU ${variant.sku || 'N/A'}: Cannot update inventory without a valid location ID.`);
+        return { success: false, updatedPrice: false, updatedInventory: false, message: "Inventory update skipped: Missing Location ID", error: "Missing Location ID" };
+   }
 
     const variantId = variant.id;
     const inventoryItemId = variant.inventoryItem.id;
@@ -499,6 +550,10 @@ async function updateVariantInShopify(variant, newPrice, newInventory) {
     // --- Determine Current Inventory ---
     let currentInventory = null;
     const inventoryLevelEdge = variant.inventoryItem.inventoryLevels?.edges?.[0]?.node;
+    if (inventoryLevelEdge?.quantities?.length > 0) {
+        const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
+        currentInventory = availableObj?.quantity;
+    }
     
     // Try to get quantity from quantities field first (2025-01+)
     if (inventoryLevelEdge?.quantities?.length > 0) {
@@ -590,36 +645,58 @@ async function updateVariantInShopify(variant, newPrice, newInventory) {
             Logger.warn(`SKU ${sku} (${productName}) inventory is not tracked by Shopify. Skipping inventory update.`);
             messages.push("Inventory not tracked.");
         } else {
-            if (currentInventoryNum === null) { Logger.warn(`SKU ${sku} (${productName}): Could not determine current inventory level from fetched data. Proceeding with update using Adjust, but comparison is skipped.`); }
-            Logger.log(`Updating inventory for SKU ${sku} (${productName}) using Adjust: ${currentInventoryNum ?? 'N/A'} -> ${newInventoryNum}`);
-            const delta = newInventoryNum - (currentInventoryNum ?? 0);
-            if (delta === 0) { messages.push("Inventory delta is 0, skipping adjust call."); }
-            else {
-                // **MODIFIED MUTATION:** Removed 'quantities' request from response as it might cause issues on older APIs if 'available' was also removed there.
-                // We rely on the 'available' field in the response which seems more consistent across versions for inventoryAdjustQuantity.
-                 const inventoryMutation = `
-                   mutation InventoryAdjustQuantity($input: InventoryAdjustQuantityInput!) {
-                     inventoryAdjustQuantity(input: $input) {
-                       inventoryLevel {
-                         available # Rely on available field in response
-                       }
-                       userErrors {
-                         field
-                         message
-                       }
-                     }
-                   }`;
-                const inventoryVariables = { input: { inventoryItemId: inventoryItemId, availableDelta: delta } };
-                try {
-                    const result = await fetchWithRetry({ method: 'POST', url: SHOPIFY_GRAPHQL_URL, headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN }, data: JSON.stringify({ query: inventoryMutation, variables: inventoryVariables }) }, true);
-                    const adjustResult = result?.data?.inventoryAdjustQuantity; const userErrors = adjustResult?.userErrors;
-                    if (userErrors && userErrors.length > 0) { const errorMsg = `Inventory update failed: ${userErrors.map(e => `(${e.field}) ${e.message}`).join(', ')}`; Logger.error(`Error adjusting inventory for SKU ${sku}: ${JSON.stringify(userErrors)}`); messages.push(errorMsg); errors.push(errorMsg); }
-                    else if (adjustResult?.inventoryLevel?.available !== undefined) { // Check 'available' in response
-                         const finalAvailable = adjustResult.inventoryLevel.available;
-                         Logger.log(`✅ Inventory adjusted successfully for SKU ${sku}. New available: ${finalAvailable}`, 'SUCCESS'); updatedInventory = true; messages.push(`Inventory: ${currentInventoryNum ?? 'N/A'} -> ${newInventoryNum} (Delta: ${delta}, Final: ${finalAvailable})`);
-                         if (finalAvailable !== newInventoryNum) { Logger.warn(`SKU ${sku}: Final inventory level (${finalAvailable}) differs from expected (${newInventoryNum}) after adjustment.`); }
-                    } else { Logger.warn(`Unknown result structure after inventory adjust for SKU ${sku} (missing inventoryLevel.available?): ${JSON.stringify(result)}`); messages.push("Inventory update status unknown."); }
-                } catch (error) { const errorMsg = `Inventory update failed: API error during mutation.`; messages.push(errorMsg); errors.push(errorMsg); }
+            // Always use inventorySetOnHandQuantities now
+            Logger.log(`Updating inventory for SKU ${sku} (${productName}) at Location ${locationId}: ${currentInventoryNum ?? 'N/A'} -> ${newInventoryNum}`);
+            const inventoryMutation = `
+               mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
+                 inventorySetOnHandQuantities(input: $input) {
+                   inventoryAdjustmentGroup {
+                      id
+                   }
+                   userErrors {
+                     field
+                     code
+                     message
+                   }
+                 }
+               }`;
+            const inventoryVariables = {
+                input: {
+                    reason: "external_sync",
+                    setQuantities: [{
+                        inventoryItemId: inventoryItemId,
+                        locationId: locationId, // Use the fetched location ID
+                        quantity: newInventoryNum,
+                    }]
+                }
+            };
+            try {
+                const result = await fetchWithRetry({
+                    method: 'POST', url: SHOPIFY_GRAPHQL_URL,
+                    headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN },
+                    data: JSON.stringify({ query: inventoryMutation, variables: inventoryVariables }),
+                }, true);
+
+                const setResult = result?.data?.inventorySetOnHandQuantities;
+                const userErrors = setResult?.userErrors;
+
+                if (userErrors && userErrors.length > 0) {
+                    const errorMsg = `Inventory update failed: ${userErrors.map(e => `(${e.field}) ${e.message}`).join(', ')}`;
+                    Logger.error(`Error setting inventory for SKU ${sku}: ${JSON.stringify(userErrors)}`);
+                    messages.push(errorMsg);
+                    errors.push(errorMsg);
+                } else if (setResult?.inventoryAdjustmentGroup?.id) {
+                    Logger.log(`✅ Inventory set successfully for SKU ${sku} at ${locationId}.`, 'SUCCESS');
+                    updatedInventory = true;
+                    messages.push(`Inventory: ${currentInventoryNum ?? 'N/A'} -> ${newInventoryNum}`);
+                } else {
+                     Logger.warn(`Unknown result structure after inventory set for SKU ${sku}: ${JSON.stringify(result)}`);
+                     messages.push("Inventory update status unknown.");
+                }
+            } catch (error) {
+                const errorMsg = `Inventory update failed: API error during mutation.`;
+                messages.push(errorMsg);
+                errors.push(errorMsg);
             }
         }
     } else if (shouldUpdateInventory && newInventoryNum !== null) {
@@ -658,7 +735,18 @@ async function updateVariantInShopify(variant, newPrice, newInventory) {
 async function syncShopifyData() {
     Logger.log(`🚀 Starting Shopify Sync (Mode: ${SYNC_MODE.toUpperCase()}, Type: ${SYNC_TYPE.toUpperCase()})`);
     const startTime = Date.now();
+    let fetchedLocationId = null; // Variable to store the fetched location ID
     try {
+        // Fetch Location ID first if inventory sync is needed
+        if (SYNC_TYPE === 'inventory' || SYNC_TYPE === 'both') {
+            fetchedLocationId = await getActiveLocationId();
+            if (!fetchedLocationId) {
+                // Decide how to handle: stop sync or continue without inventory updates?
+                Logger.error("💥 FATAL ERROR: Could not retrieve a valid inventory location ID. Aborting inventory sync.");
+                // Optionally, change SYNC_TYPE to 'price' and continue, or just throw error
+                throw new Error("Missing required Location ID for inventory sync.");
+            }
+        }
         Logger.log("Fetching data from Local APIs and Shopify...");
         const [localProducts, localInventoryMap, shopifyVariants] = await Promise.all([
             getLocalProducts(), 
@@ -790,7 +878,7 @@ async function syncShopifyData() {
             Logger.debug(`SKU ${sku}: Attempting update. Target Variant ID: ${variant.id}. Local Price: ${localProduct?.Venta1}. Local Inv Record: ${JSON.stringify(localInventoryMap[sku])}. Calculated New Price: ${newPrice}. Calculated New Inventory: ${newInventory}.`);
             
             try {
-                const result = await updateVariantInShopify(variant, newPrice, newInventory);
+                const result = await updateVariantInShopify(variant, newPrice, newInventory, fetchedLocationId);
                 return { status: 'processed', result: result, sku: sku };
             } catch (error) { 
                 Logger.error(`Critical error processing SKU ${sku} during updateVariantInShopify call.`, error); 
@@ -866,6 +954,7 @@ async function syncShopifyData() {
         }
 
     } catch (error) { 
+        Logger.error(`💥 FATAL ERROR during synchronization process: ${error.message}`, error.stack);
         process.exitCode = 1; 
     } finally { 
         await Logger.processQueue(); 
@@ -876,7 +965,6 @@ async function syncShopifyData() {
 
 // --- Main Execution ---
 (async () => {
-    
     Logger.log(`Script started at ${new Date().toLocaleString()}`);
     await syncShopifyData();
 })();
