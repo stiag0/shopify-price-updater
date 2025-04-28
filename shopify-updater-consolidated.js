@@ -662,7 +662,7 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
                }`;
             const inventoryVariables = {
                 input: {
-                    reason: "external_sync",
+                    reason: "correction",
                     setQuantities: [{
                         inventoryItemId: inventoryItemId,
                         locationId: locationId, // Use the fetched location ID
