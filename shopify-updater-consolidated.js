@@ -46,6 +46,27 @@ const Logger = {
     logPath: LOG_FILE_PATH,
     logQueue: [],
     isWriting: false,
+    currentLogStartTime: null,
+    /**
+     * Formats a Date object into YYYYMMDD-HHMMSS string.
+     * @param {Date} date - The date object to format.
+     * @returns {string} Formatted date string.
+     */
+    formatDateForFilename(date) {
+        if (!date || !(date instanceof Date) || isNaN(date)) {
+             // Handle invalid date input, return a default string or throw error
+             console.error("Invalid date passed to formatDateForFilename");
+             // Return a generic timestamp to avoid crashing rename
+             return new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
+        }
+        const year = date.getFullYear();
+        const month = (date.getMonth() + 1).toString().padStart(2, '0');
+        const day = date.getDate().toString().padStart(2, '0');
+        const hours = date.getHours().toString().padStart(2, '0');
+        const minutes = date.getMinutes().toString().padStart(2, '0');
+        const seconds = date.getSeconds().toString().padStart(2, '0');
+        return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+    },
 
     init() {
         try {
@@ -53,7 +74,29 @@ const Logger = {
                 fs.mkdirSync(this.logDir, { recursive: true });
             }
             if (!fs.existsSync(this.logPath)) {
-                fs.writeFileSync(this.logPath, `[${new Date().toISOString()}] [INFO] Logger initialized.\n`);
+                // File doesn't exist, create it and set start time
+                this.currentLogStartTime = new Date();
+                fs.writeFileSync(this.logPath, `[${this.currentLogStartTime.toISOString()}] [INFO] Logger initialized. New log file created.\n`);
+            }else {
+                // File exists, estimate start time from file stats (birthtime or mtime)
+                try {
+                    const stats = fs.statSync(this.logPath);
+                    // Prefer birthtime, fallback to mtime
+                    this.currentLogStartTime = stats.birthtimeMs ? new Date(stats.birthtimeMs) : new Date(stats.mtimeMs);
+                    // Log initialization without using Logger.log to avoid queue issues during init
+                    console.log(`[${new Date().toISOString()}] [INFO] Logger initialized. Existing log file found. Estimated start time: ${this.currentLogStartTime.toISOString()}`);
+                    // Optionally write directly to file if needed, but console log is safer during init
+                    // fs.appendFileSync(this.logPath, `[${new Date().toISOString()}] [INFO] Logger continuing in existing file. Estimated start time: ${this.currentLogStartTime.toISOString()}\n`);
+
+                } catch (statError) {
+                    // If stats fail, default to now
+                    console.error(`[${new Date().toISOString()}] [ERROR] Could not get stats for existing log file. Setting start time to now. ${statError.message}`);
+                    this.currentLogStartTime = new Date();
+                     // Attempt to write error to log file if possible
+                     try {
+                         fs.appendFileSync(this.logPath, `[${new Date().toISOString()}] [ERROR] Could not get stats for existing log file. Setting start time to now. ${statError.message}\n`);
+                     } catch (appendErr) { /* Ignore if append fails */ }
+                }
             }
         } catch (error) {
             console.error(`Fatal Error: Could not initialize logger at ${this.logPath}. ${error.message}`);
@@ -73,6 +116,12 @@ const Logger = {
         const logContent = messagesToWrite.join('');
 
         try {
+            // Check if the log file still exists (it might have been rotated)
+            if (!fs.existsSync(this.logPath)) {
+                console.warn(`[${new Date().toISOString()}] [WARN] Log file ${this.logPath} disappeared before writing. Re-initializing.`);
+                // Re-initialize to create the file and reset start time
+                this.init(); // This will create the file and set currentLogStartTime
+            }
             await fs.promises.appendFile(this.logPath, logContent, 'utf8');
         } catch (error) {
             console.error(`Error writing to log file ${this.logPath}: ${error.message}`);
@@ -146,19 +195,46 @@ const Logger = {
     },
 
     async rotateLog() {
-        const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
-        const backupPath = path.join(this.logDir, `shopify-sync.${timestamp}.log`);
-        const rotateMessage = `[${new Date().toISOString()}] [INFO] Rotating log file. Previous log: ${path.basename(backupPath)}\n`;
+        const endTime = new Date(); // Rotation happens now
+        // Ensure we have a valid start time, default to a short interval before end time if missing
+        const startTime = this.currentLogStartTime instanceof Date && !isNaN(this.currentLogStartTime)
+                          ? this.currentLogStartTime
+                          : new Date(endTime.getTime() - 60000); // Fallback to 1 min before end
+
+        const startTimeFormatted = this.formatDateForFilename(startTime);
+        const endTimeFormatted = this.formatDateForFilename(endTime);
+
+        // Construct the new filename with date range
+        const backupFilename = `shopify-sync_${startTimeFormatted}_${endTimeFormatted}.log`;
+        const backupPath = path.join(this.logDir, backupFilename);
+        const rotateMessage = `Rotating log file. Previous log covers range starting ~${startTime.toISOString()}. Archived as: ${backupFilename}`;
 
         try {
-            console.log(`Log file size limit reached. Rotating ${path.basename(this.logPath)} to ${path.basename(backupPath)}`);
+            // Check if the source file exists before renaming
+            if (!fs.existsSync(this.logPath)) {
+                console.warn(`[${new Date().toISOString()}] [WARN] Attempted to rotate log, but current file ${this.logPath} does not exist. Creating new log.`);
+                this.currentLogStartTime = new Date(); // Reset start time
+                await fs.promises.writeFile(this.logPath, `[${this.currentLogStartTime.toISOString()}] [INFO] New log file started (previous missing during rotation).\n`, 'utf8');
+                return;
+            }
+
+            console.log(`[${endTime.toISOString()}] [INFO] ${rotateMessage}`); // Log rotation info to console
+
+            // Rename current log file
             await fs.promises.rename(this.logPath, backupPath);
-            await fs.promises.writeFile(this.logPath, rotateMessage, 'utf8');
-            console.log("Log rotation complete.");
-            this.cleanOldLogs().catch(err => console.error(`Error during old log cleanup: ${err.message}`));
+
+            // Create a new empty log file and record the new start time
+            this.currentLogStartTime = new Date(); // Reset start time for the new file
+            await fs.promises.writeFile(this.logPath, `[${this.currentLogStartTime.toISOString()}] [INFO] New log file started after rotation.\nArchived previous log to: ${backupFilename}\n`, 'utf8');
+
+            console.log("Log rotation complete. New log file started.");
+
         } catch (error) {
-            console.error(`Error rotating log file ${this.logPath}: ${error.message}`);
+            console.error(`Error rotating log file ${this.logPath} to ${backupPath}: ${error.message}`);
+            // Attempt to continue logging to the original file if rename failed, but reset start time aggressively
+            this.currentLogStartTime = new Date(); // Reset start time even on failure
             try {
+                // Try appending error to the *original* path, it might still exist or get recreated
                 await fs.promises.appendFile(this.logPath, `[${new Date().toISOString()}] [ERROR] Log rotation failed: ${error.message}\n`, 'utf8');
             } catch (appendError) {
                 console.error(`CRITICAL: Failed to write rotation error to log file: ${appendError.message}`);
@@ -166,44 +242,7 @@ const Logger = {
         }
     },
 
-    async cleanOldLogs() {
-        try {
-            const files = await fs.promises.readdir(this.logDir);
-            const logFiles = files
-                .filter(file => file.startsWith('shopify-sync.') && file.endsWith('.log') && file !== path.basename(this.logPath))
-                .map(file => {
-                    try {
-                        return {
-                            name: file,
-                            path: path.join(this.logDir, file),
-                            mtime: fs.statSync(path.join(this.logDir, file)).mtime.getTime()
-                        };
-                    } catch (statErr) {
-                        console.error(`Could not stat file during cleanup: ${file}. Skipping. Error: ${statErr.message}`);
-                        return null;
-                    }
-                })
-                .filter(Boolean)
-                .sort((a, b) => b.mtime - a.mtime);
-
-            const keepCount = 10;
-            const filesToDelete = logFiles.slice(keepCount);
-
-            if (filesToDelete.length > 0) {
-                Logger.log(`Cleaning up ${filesToDelete.length} old log files...`);
-                for (const file of filesToDelete) {
-                    try {
-                        await fs.promises.unlink(file.path);
-                        Logger.log(`Deleted old log file: ${file.name}`);
-                    } catch (unlinkError) {
-                        Logger.error(`Failed to delete old log file ${file.name}`, unlinkError);
-                    }
-                }
-            }
-        } catch (error) {
-            Logger.error("Error cleaning old log files", error);
-        }
-    }
+   
 };
 Logger.init();
 /**
