@@ -5,23 +5,45 @@ const path = require('path');
 const readline = require('readline');
 const { RateLimiter } = require('limiter');
 const csv = require('csv-parser');
+const stream = require('stream');
 
 async function loadDiscounts(csvPath) {
-  return new Promise((resolve, reject) => {
-    const discounts = new Map();
-    fs.createReadStream(csvPath)
-      .pipe(csv({ headers: ['sku','discount'], skipLines: 0 }))
-      .on('data', row => {
-        const sku = cleanSku(row.sku);
-        const pct = parseFloat(row.discount);
-        if (sku && !isNaN(pct)) discounts.set(sku, pct);
-      })
-      .on('end', () => {
-        Logger.log(`🗒️ Loaded ${discounts.size} discount entries from ${csvPath}`);
-        resolve(discounts);
-      })
-      .on('error', err => reject(err));
-  });
+    return new Promise(async (resolve, reject) => {
+        const discounts = new Map();
+        let inputStream;
+    
+        // ¿Es una URL HTTP/HTTPS?
+        const isUrl = /^https?:\/\//i.test(csvPath);
+    
+        if (isUrl) {
+          try {
+            Logger.log(`🌐 Descargando CSV de descuentos desde URL: ${csvPath}`);
+            const resp = await axios.get(csvPath, { responseType: 'stream' });
+            inputStream = resp.data;                             // ya es un readable stream
+          } catch (err) {
+            return reject(new Error(`Error descargando CSV: ${err.message}`));
+          }
+        } else {
+          // Ruta local
+          if (!fs.existsSync(csvPath)) {
+            return reject(new Error(`No existe el archivo discounts.csv en ${csvPath}`));
+          }
+          inputStream = fs.createReadStream(csvPath);
+        }
+    
+        inputStream
+          .pipe(csv({ headers: ['sku','discount'], skipLines: 0 }))
+          .on('data', row => {
+            const sku = cleanSku(row.sku);
+            const pct = parseFloat(row.discount);
+            if (sku && !isNaN(pct)) discounts.set(sku, pct);
+          })
+          .on('end', () => {
+            Logger.log(`🗒️ Loaded ${discounts.size} descuentos desde ${isUrl ? 'URL' : 'archivo local'}`);
+            resolve(discounts);
+          })
+          .on('error', err => reject(err));
+      });
 }
 
 // --- Configuration from Environment Variables ---
@@ -36,6 +58,8 @@ const {
 // --- Constants and Defaults ---
 const SHOPIFY_API_VERSION = '2024-10'; // Use a current supported API version
 const SHOPIFY_GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
+//                                                        https://drive.google.com/uc?export=download&id=TU_ID
+const DISCOUNT_CSV_PATH= process.env.DISCOUNT_CSV_PATH ||"discounts.csv"; // Local path or URL to CSV file
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
 const LOG_FILE_PATH = process.env.LOG_FILE_PATH || path.join('logs', 'shopify-sync.log');
 const LOG_MAX_SIZE_MB = parseInt(process.env.LOG_MAX_SIZE || '100', 10);
@@ -793,8 +817,14 @@ async function syncShopifyData() {
     const startTime = Date.now();
     let fetchedLocationId = null; // Variable to store the fetched location ID
     
-    const discountsPath = path.join(__dirname, 'discounts.csv');
+    const discountsPath = process.env.DISCOUNT_CSV_PATH;
     let discountMap = new Map();
+    try {
+    discountMap = await loadDiscounts(discountsPath);
+    } catch (e) {
+    Logger.warn(`No pude cargar descuentos desde ${discountsPath}: ${e.message}`);
+    }
+
 
     if (!fs.existsSync(discountsPath)) {
     Logger.warn(`discounts.csv no encontrado en ${discountsPath}, continuando sin descuentos.`);
