@@ -6,7 +6,7 @@ module.exports = {
     SHOPIFY_ACCESS_TOKEN: process.env.SHOPIFY_ACCESS_TOKEN,
     DATA_API_URL: process.env.DATA_API_URL, // Para productos locales
     INVENTORY_API_URL: process.env.INVENTORY_API_URL, // Para inventario local
-    DISCOUNT_CSV_PATH: process.env.DISCOUNT_CSV_PATH || './discounts.csv', // Ruta local o URL pública del CSV de descuentos
+    DISCOUNT_CSV_PATH: process.env.DISCOUNT_CSV_PATH, // URL pública del CSV de descuentos  Ejemplo en .env: DISCOUNT_CSV_PATH="https://docs.google.com/spreadsheets/d/e/YOUR_SHEET_ID/pub?gid=YOUR_GID&single=true&output=csv"
 
     LOG_FILE_PATH: process.env.LOG_FILE_PATH || path.join(__dirname, '..', 'logs', 'shopify-sync.log'), // Ajusta la ruta si 'common' está en un subdirectorio
     LOG_MAX_SIZE_MB: parseInt(process.env.LOG_MAX_SIZE_MB || '50', 10), // Default 50MB
