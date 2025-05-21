@@ -19,7 +19,7 @@ const {
 } = process.env;
 
 // --- Constants and Defaults ---
-const SHOPIFY_API_VERSION = '2025-04'; // Use the latest API version that includes variantUpdate
+const SHOPIFY_API_VERSION = '2024-10'; // Using a stable API version that includes productVariantUpdate
 const SHOPIFY_GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 const DISCOUNT_CSV_PATH = process.env.DISCOUNT_CSV_PATH || "discounts.csv"; // Local path or URL to CSV file
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
@@ -633,11 +633,11 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
     if (shouldUpdatePrice && newPriceStr !== null && currentPriceStr !== newPriceStr) {
         Logger.log(`Updating price for SKU ${sku} (${productName}): ${currentPriceStr} -> ${newPriceStr}`);
         
-        // Updated mutation name for 2025-04 API
+        // Use the correct mutation name for the API version
         const priceMutation = `
-          mutation variantUpdate($input: ProductVariantInput!) {
-            variantUpdate(input: $input) {
-              variant {
+          mutation productVariantUpdate($input: ProductVariantInput!) {
+            productVariantUpdate(input: $input) {
+              productVariant {
                 id
                 price
               }
@@ -663,24 +663,24 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
                 data: JSON.stringify({ query: priceMutation, variables: priceVariables }),
             }, true);
 
-            // Updated result structure for 2025-04 API
-            const updateResult = result?.data?.variantUpdate;
-            const userErrors = updateResult?.userErrors;
-
             // Log the full response structure for debugging
             Logger.debug(`Price update response for SKU ${sku}: ${JSON.stringify(result)}`);
+            
+            // Get the result data from the correct path based on the mutation name
+            const updateResult = result?.data?.productVariantUpdate;
+            const userErrors = updateResult?.userErrors;
 
             if (userErrors && userErrors.length > 0) {
                 const errorMsg = `Price update failed: ${userErrors.map(e => `(${e.field}) ${e.message}`).join(', ')}`;
                 Logger.error(`Error updating price for SKU ${sku}: ${JSON.stringify(userErrors)}`);
                 messages.push(errorMsg);
                 errors.push(errorMsg);
-            } else if (updateResult?.variant?.id || updateResult?.variant) {
-                // Accept either variant.id or just variant existing as success
+            } else if (updateResult?.productVariant?.id || updateResult?.productVariant) {
+                // Accept either productVariant.id or just productVariant existing as success
                 Logger.log(`✅ Price updated successfully for SKU ${sku}.`, 'SUCCESS');
                 updatedPrice = true;
                 messages.push(`Price: ${currentPriceStr} -> ${newPriceStr}`);
-            } else if (result?.data?.variantUpdate && !userErrors) {
+            } else if (result?.data?.productVariantUpdate && !userErrors) {
                 // Sometimes the API returns a successful response without the expected structure
                 Logger.log(`✅ Price update seems successful for SKU ${sku} (non-standard response).`, 'SUCCESS');
                 updatedPrice = true;
