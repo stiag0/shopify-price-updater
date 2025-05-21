@@ -667,13 +667,22 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
             const updateResult = result?.data?.variantUpdate;
             const userErrors = updateResult?.userErrors;
 
+            // Log the full response structure for debugging
+            Logger.debug(`Price update response for SKU ${sku}: ${JSON.stringify(result)}`);
+
             if (userErrors && userErrors.length > 0) {
                 const errorMsg = `Price update failed: ${userErrors.map(e => `(${e.field}) ${e.message}`).join(', ')}`;
                 Logger.error(`Error updating price for SKU ${sku}: ${JSON.stringify(userErrors)}`);
                 messages.push(errorMsg);
                 errors.push(errorMsg);
-            } else if (updateResult?.variant?.id) {
+            } else if (updateResult?.variant?.id || updateResult?.variant) {
+                // Accept either variant.id or just variant existing as success
                 Logger.log(`✅ Price updated successfully for SKU ${sku}.`, 'SUCCESS');
+                updatedPrice = true;
+                messages.push(`Price: ${currentPriceStr} -> ${newPriceStr}`);
+            } else if (result?.data?.variantUpdate && !userErrors) {
+                // Sometimes the API returns a successful response without the expected structure
+                Logger.log(`✅ Price update seems successful for SKU ${sku} (non-standard response).`, 'SUCCESS');
                 updatedPrice = true;
                 messages.push(`Price: ${currentPriceStr} -> ${newPriceStr}`);
             } else {
