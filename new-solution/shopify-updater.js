@@ -633,11 +633,11 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
     if (shouldUpdatePrice && newPriceStr !== null && currentPriceStr !== newPriceStr) {
         Logger.log(`Updating price for SKU ${sku} (${productName}): ${currentPriceStr} -> ${newPriceStr}`);
         
-        // Use the correct mutation name for the API version
+        // Try to use the variant update mutation for API 2023-01 and newer
         const priceMutation = `
-          mutation productVariantUpdate($input: ProductVariantInput!) {
-            productVariantUpdate(input: $input) {
-              productVariant {
+          mutation variantBulkUpdate($input: [VariantsBulkInput!]!) {
+            variantsBulkUpdate(variants: $input) {
+              variants {
                 id
                 price
               }
@@ -649,10 +649,12 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
           }`;
           
         const priceVariables = {
-            input: {
-                id: variantId,
-                price: newPriceStr,
-            }
+            input: [
+                {
+                    id: variantId,
+                    price: newPriceStr
+                }
+            ]
         };
 
         try {
@@ -667,7 +669,7 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
             Logger.debug(`Price update response for SKU ${sku}: ${JSON.stringify(result)}`);
             
             // Get the result data from the correct path based on the mutation name
-            const updateResult = result?.data?.productVariantUpdate;
+            const updateResult = result?.data?.variantsBulkUpdate;
             const userErrors = updateResult?.userErrors;
 
             if (userErrors && userErrors.length > 0) {
@@ -675,12 +677,12 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
                 Logger.error(`Error updating price for SKU ${sku}: ${JSON.stringify(userErrors)}`);
                 messages.push(errorMsg);
                 errors.push(errorMsg);
-            } else if (updateResult?.productVariant?.id || updateResult?.productVariant) {
-                // Accept either productVariant.id or just productVariant existing as success
+            } else if (updateResult?.variants && updateResult.variants.length > 0) {
+                // If we got variants back, consider it a success
                 Logger.log(`✅ Price updated successfully for SKU ${sku}.`, 'SUCCESS');
                 updatedPrice = true;
                 messages.push(`Price: ${currentPriceStr} -> ${newPriceStr}`);
-            } else if (result?.data?.productVariantUpdate && !userErrors) {
+            } else if (result?.data?.variantsBulkUpdate && !userErrors) {
                 // Sometimes the API returns a successful response without the expected structure
                 Logger.log(`✅ Price update seems successful for SKU ${sku} (non-standard response).`, 'SUCCESS');
                 updatedPrice = true;
