@@ -633,67 +633,52 @@ async function updateVariantInShopify(variant, newPrice, newInventory, locationI
     if (shouldUpdatePrice && newPriceStr !== null && currentPriceStr !== newPriceStr) {
         Logger.log(`Updating price for SKU ${sku} (${productName}): ${currentPriceStr} -> ${newPriceStr}`);
         
-        // Try to use the variant update mutation for API 2023-01 and newer
-        const priceMutation = `
-          mutation variantBulkUpdate($input: [VariantsBulkInput!]!) {
-            variantsBulkUpdate(variants: $input) {
-              variants {
-                id
-                price
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }`;
-          
-        const priceVariables = {
-            input: [
-                {
-                    id: variantId,
-                    price: newPriceStr
-                }
-            ]
-        };
-
+        // Extract numeric ID from variantId (remove gid://shopify/ProductVariant/ prefix)
+        const numericId = variantId.split('/').pop();
+        
+        // Use REST API instead of GraphQL for more consistent behavior across API versions
+        const restUrl = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/variants/${numericId}.json`;
+        
         try {
             const result = await fetchWithRetry({
-                method: 'POST',
-                url: SHOPIFY_GRAPHQL_URL,
-                headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN },
-                data: JSON.stringify({ query: priceMutation, variables: priceVariables }),
+                method: 'PUT',
+                url: restUrl,
+                headers: { 
+                    'Content-Type': 'application/json', 
+                    'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN 
+                },
+                data: JSON.stringify({ 
+                    variant: { 
+                        id: numericId, 
+                        price: newPriceStr 
+                    } 
+                }),
             }, true);
 
             // Log the full response structure for debugging
             Logger.debug(`Price update response for SKU ${sku}: ${JSON.stringify(result)}`);
             
-            // Get the result data from the correct path based on the mutation name
-            const updateResult = result?.data?.variantsBulkUpdate;
-            const userErrors = updateResult?.userErrors;
-
-            if (userErrors && userErrors.length > 0) {
-                const errorMsg = `Price update failed: ${userErrors.map(e => `(${e.field}) ${e.message}`).join(', ')}`;
-                Logger.error(`Error updating price for SKU ${sku}: ${JSON.stringify(userErrors)}`);
-                messages.push(errorMsg);
-                errors.push(errorMsg);
-            } else if (updateResult?.variants && updateResult.variants.length > 0) {
-                // If we got variants back, consider it a success
+            if (result && result.variant) {
                 Logger.log(`✅ Price updated successfully for SKU ${sku}.`, 'SUCCESS');
                 updatedPrice = true;
                 messages.push(`Price: ${currentPriceStr} -> ${newPriceStr}`);
-            } else if (result?.data?.variantsBulkUpdate && !userErrors) {
+            } else if (result && !result.errors) {
                 // Sometimes the API returns a successful response without the expected structure
                 Logger.log(`✅ Price update seems successful for SKU ${sku} (non-standard response).`, 'SUCCESS');
                 updatedPrice = true;
                 messages.push(`Price: ${currentPriceStr} -> ${newPriceStr}`);
-
+            } else if (result && result.errors) {
+                const errorMsg = `Price update failed: ${JSON.stringify(result.errors)}`;
+                Logger.error(`Error updating price for SKU ${sku}: ${errorMsg}`);
+                messages.push(errorMsg);
+                errors.push(errorMsg);
             } else {
                 Logger.warn(`Unknown result structure after price update for SKU ${sku}: ${JSON.stringify(result)}`);
                 messages.push("Price update status unknown.");
             }
         } catch (error) {
-            const errorMsg = `Price update failed: API error during mutation.`;
+            const errorMsg = `Price update failed: API error during REST call: ${error.message}`;
+            Logger.error(errorMsg);
             messages.push(errorMsg);
             errors.push(errorMsg);
         }
