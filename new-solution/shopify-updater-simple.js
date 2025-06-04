@@ -392,34 +392,33 @@ async function loadDiscountPrices() {
     const discountPrices = new Map();
     
     try {
-        let csvStream;
-        
-        // Check if the path is a URL
-        if (DISCOUNT_CSV_PATH.startsWith('http')) {
-            Logger.info('Fetching discount CSV from URL...');
-            const response = await axios({
-                method: 'get',
-                url: DISCOUNT_CSV_PATH,
-                responseType: 'stream'
-            });
-            csvStream = response.data;
-        } else {
-            Logger.info('Reading local discount CSV file...');
-            csvStream = fs.createReadStream(DISCOUNT_CSV_PATH);
-        }
+        Logger.info('Fetching discount CSV from URL...');
+        const response = await axios({
+            method: 'get',
+            url: DISCOUNT_CSV_PATH,
+            responseType: 'stream'
+        });
 
         return new Promise((resolve, reject) => {
-            csvStream
+            response.data
                 .pipe(csv())
                 .on('data', (row) => {
+                    // Get SKU and discount from the correct column names
                     const sku = row.sku?.toString().trim();
-                    const price = parseFloat(row.discount_price);
-                    if (sku && !isNaN(price)) {
+                    const price = parseFloat(row.discount); // Changed from discount_price to discount
+                    
+                    // Only add if both SKU and price are valid
+                    if (sku && !isNaN(price) && price > 0) {
                         discountPrices.set(sku, price);
+                        Logger.debug(`Loaded discount for SKU ${sku}: ${price}`); // Optional debug logging
                     }
                 })
                 .on('end', () => {
                     Logger.info(`Loaded ${discountPrices.size} discount prices from CSV`);
+                    if (discountPrices.size === 0) {
+                        Logger.warn('No valid discount prices found in CSV. CSV columns found: ' + 
+                            Object.keys(row || {}).join(', '));
+                    }
                     resolve(discountPrices);
                 })
                 .on('error', (error) => {
