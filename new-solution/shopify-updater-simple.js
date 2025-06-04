@@ -37,6 +37,7 @@ const shopifyLimiter = new RateLimiter({ tokensPerInterval: RATE_LIMIT, interval
 
 // Axios instances for different endpoints
 const axiosShopify = axios.create({
+    baseURL: USE_REST_API === 'true' ? undefined : SHOPIFY_GRAPHQL_URL, // Only use baseURL for GraphQL
     headers: {
         'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
         'Content-Type': 'application/json',
@@ -520,7 +521,7 @@ async function getAllShopifyVariants() {
 
     if (USE_REST_API === 'true') {
         // REST API Implementation using Link header-based pagination
-        let nextUrl = `/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=${REST_API_LIMIT}&fields=id,title,variants`;  // Include full path and fields
+        let nextUrl = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=${REST_API_LIMIT}&fields=id,title,variants`;  // Complete URL with protocol and domain
         
         while (nextUrl && pageCount < MAX_PAGES) {
             try {
@@ -564,12 +565,10 @@ async function getAllShopifyVariants() {
                     const links = linkHeader.split(',');
                     for (const link of links) {
                         if (link.includes('rel="next"')) {
-                            // Extract URL from the link
+                            // Extract URL from the link - Link header already contains full URL
                             const matches = link.match(/<([^>]+)>/);
                             if (matches) {
-                                // Convert full URL to relative path
-                                const fullUrl = matches[1];
-                                nextUrl = fullUrl.substring(fullUrl.indexOf('/admin/api/')); // Keep the full admin/api path
+                                nextUrl = matches[1]; // Use the full URL from the Link header
                             }
                             break;
                         }
