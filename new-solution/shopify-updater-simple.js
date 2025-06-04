@@ -388,18 +388,39 @@ async function getOriginalData() {
 
         const dataMap = new Map();
         let skippedNonNumeric = 0;
+        let skippedZeroPrices = 0;
+        let processedSkus = new Set();
+
+        // Debug logging for SKU processing
+        Logger.info('Processing SKUs from API data...');
 
         for (const product of products) {
-            const sku = (product.Referencia || product.CodigoProducto || '').toString().trim();
+            const rawSku = (product.Referencia || product.CodigoProducto || '').toString().trim();
+            // Convert to string and pad with zeros if needed (up to 5 digits)
+            const paddedSku = rawSku.padStart(5, '0');
+            const numericSku = rawSku.replace(/^0+/, ''); // Remove leading zeros for comparison
+            
+            // Log SKU processing
+            Logger.debug(`Processing SKU - Raw: ${rawSku}, Padded: ${paddedSku}, Numeric: ${numericSku}`);
             
             // Only process if SKU is purely numeric (1-5 digits)
-            if (/^\d{1,5}$/.test(sku)) {
+            if (/^\d{1,5}$/.test(numericSku)) {
                 const price = parseFloat(product.Venta1 || 0);
-                if (!isNaN(price)) {
-                    dataMap.set(sku, {
+                if (!isNaN(price) && price > 0) {
+                    // Store both padded and non-padded versions
+                    dataMap.set(paddedSku, {
                         price,
-                        inventory: 0
+                        inventory: 0,
+                        originalSku: rawSku
                     });
+                    dataMap.set(numericSku, {
+                        price,
+                        inventory: 0,
+                        originalSku: rawSku
+                    });
+                    processedSkus.add(rawSku);
+                } else {
+                    skippedZeroPrices++;
                 }
             } else {
                 skippedNonNumeric++;
@@ -412,24 +433,37 @@ async function getOriginalData() {
         const inventory = invResponse.data.value || [];
 
         let skippedInvNonNumeric = 0;
+        let processedInvSkus = new Set();
 
-        // Update inventory quantities only for numeric SKUs
+        // Update inventory quantities
         for (const item of inventory) {
-            const sku = (item.Referencia || item.CodigoProducto || '').toString().trim();
+            const rawSku = (item.Referencia || item.CodigoProducto || '').toString().trim();
+            const paddedSku = rawSku.padStart(5, '0');
+            const numericSku = rawSku.replace(/^0+/, '');
             
-            if (/^\d{1,5}$/.test(sku) && dataMap.has(sku)) {
+            if (/^\d{1,5}$/.test(numericSku)) {
                 const realInventory = parseFloat(item.CantidadInicial || 0) + 
                                     parseFloat(item.CantidadEntradas || 0) - 
                                     parseFloat(item.CantidadSalidas || 0);
                 
-                dataMap.get(sku).inventory = Math.max(0, Math.round(realInventory));
-            } else if (!/^\d{1,5}$/.test(sku)) {
+                // Try both padded and non-padded versions
+                if (dataMap.has(paddedSku)) {
+                    dataMap.get(paddedSku).inventory = Math.max(0, Math.round(realInventory));
+                    processedInvSkus.add(rawSku);
+                }
+                if (dataMap.has(numericSku)) {
+                    dataMap.get(numericSku).inventory = Math.max(0, Math.round(realInventory));
+                    processedInvSkus.add(rawSku);
+                }
+            } else {
                 skippedInvNonNumeric++;
             }
         }
         
-        Logger.info(`Loaded ${dataMap.size} numeric-only products from API`);
+        Logger.info(`Loaded ${processedSkus.size} numeric-only products from API`);
+        Logger.info(`Processed ${processedInvSkus.size} inventory records`);
         Logger.info(`Skipped ${skippedNonNumeric} products with non-numeric SKUs`);
+        Logger.info(`Skipped ${skippedZeroPrices} products with zero or invalid prices`);
         Logger.info(`Skipped ${skippedInvNonNumeric} inventory records with non-numeric SKUs`);
         
         return dataMap;
@@ -588,8 +622,16 @@ async function getAllShopifyVariants() {
                 const variants = response.data.data.productVariants;
                 
                 variants.edges.forEach(({ node }) => {
-                    if (node.sku && /^\d{1,5}$/.test(node.sku)) {
-                        allVariants.set(node.sku, node);
+                    const rawSku = node.sku?.trim() || '';
+                    const paddedSku = rawSku.padStart(5, '0');
+                    const numericSku = rawSku.replace(/^0+/, '');
+                    
+                    Logger.debug(`Processing Shopify variant - Raw SKU: ${rawSku}, Padded: ${paddedSku}, Numeric: ${numericSku}`);
+                    
+                    if (node.sku && /^\d{1,5}$/.test(numericSku)) {
+                        // Store both padded and non-padded versions for matching
+                        allVariants.set(paddedSku, node);
+                        allVariants.set(numericSku, node);
                     }
                 });
 
@@ -632,15 +674,39 @@ async function main() {
         // Load original data from API
         const originalData = await getOriginalData();
         
-        // Filter original data to only include SKUs that exist in Shopify
+        // Modify the matching logic
         const filteredData = new Map();
+        let matchedSkus = new Set();
+        let skippedSkus = new Set();
+
+        Logger.info('Matching products with Shopify variants...');
+
         for (const [sku, data] of originalData) {
-            if (shopifyVariants.has(sku)) {
+            const paddedSku = sku.padStart(5, '0');
+            const numericSku = sku.replace(/^0+/, '');
+            
+            if (shopifyVariants.has(paddedSku) || shopifyVariants.has(numericSku)) {
+                const variant = shopifyVariants.get(paddedSku) || shopifyVariants.get(numericSku);
+                const productName = variant.product?.title || 'Unknown Product';
+                Logger.info(`Matched SKU ${sku} to Shopify product "${productName}"`);
                 filteredData.set(sku, data);
+                matchedSkus.add(sku);
+            } else {
+                skippedSkus.add(sku);
             }
         }
-        
-        Logger.info(`Matched ${filteredData.size} products with Shopify variants`);
+
+        Logger.info(`Matching results:`);
+        Logger.info(`- Total Shopify variants: ${shopifyVariants.size}`);
+        Logger.info(`- Total local products: ${originalData.size}`);
+        Logger.info(`- Successfully matched: ${matchedSkus.size}`);
+        Logger.info(`- Unmatched SKUs: ${skippedSkus.size}`);
+
+        // Sample of unmatched SKUs for debugging
+        const sampleUnmatched = Array.from(skippedSkus).slice(0, 5);
+        if (sampleUnmatched.length > 0) {
+            Logger.info(`Sample of unmatched SKUs: ${sampleUnmatched.join(', ')}`);
+        }
         
         // Load and filter discount prices
         let discountPrices = new Map();
