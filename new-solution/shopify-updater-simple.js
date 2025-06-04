@@ -339,20 +339,32 @@ async function getOriginalData() {
         const products = response.data.value || [];
         
         if (!Array.isArray(products)) {
-            throw new Error(`Invalid API response structure. Expected array in value property, got ${typeof products}. Response: ${JSON.stringify(response.data)}`);
+            throw new Error(`Invalid API response structure. Expected array in value property, got ${typeof products}`);
         }
 
         const dataMap = new Map();
         for (const product of products) {
-            // Use Referencia as SKU, fallback to CodigoProducto
-            const sku = (product.Referencia || product.CodigoProducto || '').toString().trim();
+            // Get both Referencia and CodigoProducto
+            const referencia = (product.Referencia || '').toString().trim();
+            const codigo = (product.CodigoProducto || '').toString().trim();
             const price = parseFloat(product.Venta1 || 0);
             
-            if (sku && !isNaN(price)) {
-                dataMap.set(sku, {
-                    price,
-                    inventory: 0  // Will be updated when we fetch inventory data
-                });
+            if (price && !isNaN(price)) {
+                // Store both SKU versions in the map
+                if (referencia) {
+                    dataMap.set(referencia, {
+                        price,
+                        inventory: 0,
+                        alternativeSku: codigo
+                    });
+                }
+                if (codigo) {
+                    dataMap.set(codigo, {
+                        price,
+                        inventory: 0,
+                        alternativeSku: referencia
+                    });
+                }
             }
         }
         
@@ -363,28 +375,29 @@ async function getOriginalData() {
 
         // Update inventory quantities
         for (const item of inventory) {
-            const sku = (item.Referencia || item.CodigoProducto || '').toString().trim();
-            if (dataMap.has(sku)) {
-                const existingData = dataMap.get(sku);
-                // Calculate real inventory: Initial + Entries - Exits
-                const realInventory = parseFloat(item.CantidadInicial || 0) + 
-                                    parseFloat(item.CantidadEntradas || 0) - 
-                                    parseFloat(item.CantidadSalidas || 0);
-                
-                existingData.inventory = Math.max(0, Math.round(realInventory));  // Ensure non-negative
-                dataMap.set(sku, existingData);
+            const referencia = (item.Referencia || '').toString().trim();
+            const codigo = (item.CodigoProducto || '').toString().trim();
+            
+            // Calculate real inventory
+            const realInventory = parseFloat(item.CantidadInicial || 0) + 
+                                parseFloat(item.CantidadEntradas || 0) - 
+                                parseFloat(item.CantidadSalidas || 0);
+            
+            const inventoryValue = Math.max(0, Math.round(realInventory));
+
+            // Update inventory for both SKU versions
+            if (referencia && dataMap.has(referencia)) {
+                dataMap.get(referencia).inventory = inventoryValue;
+            }
+            if (codigo && dataMap.has(codigo)) {
+                dataMap.get(codigo).inventory = inventoryValue;
             }
         }
         
         Logger.info(`Loaded ${dataMap.size} products from API`);
         return dataMap;
     } catch (error) {
-        Logger.error('Error fetching data:');
-        Logger.error(error.message);
-        if (error.response?.data) {
-            Logger.error('API Response:');
-            Logger.error(JSON.stringify(error.response.data, null, 2));
-        }
+        Logger.error('Error fetching data:', error);
         throw error;
     }
 }
@@ -462,15 +475,20 @@ async function main() {
         const regularProducts = new Map();
 
         for (const [sku, data] of originalData) {
-            if (discountPrices.has(sku)) {
+            // Check both the main SKU and alternative SKU for discounts
+            if (discountPrices.has(sku) || discountPrices.has(data.alternativeSku)) {
+                const discountPrice = discountPrices.get(sku) || discountPrices.get(data.alternativeSku);
                 discountProducts.set(sku, {
                     ...data,
-                    discountPrice: discountPrices.get(sku)
+                    discountPrice
                 });
+                Logger.info(`Marked SKU ${sku} for discount update (discount price: ${discountPrice})`);
             } else {
                 regularProducts.set(sku, data);
             }
         }
+
+        Logger.info(`Found ${discountProducts.size} products with discounts to update`);
 
         // First process discount products (these need compare_at_price updates)
         Logger.info(`Processing ${discountProducts.size} products with discounts...`);
