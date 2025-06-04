@@ -490,23 +490,46 @@ async function loadDiscountPrices() {
         const response = await axios({
             method: 'get',
             url: DISCOUNT_CSV_PATH,
-            responseType: 'stream'
+            responseType: 'stream',
+            validateStatus: false // Allow non-200 status codes
         });
 
+        if (response.status !== 200) {
+            throw new Error(`Failed to fetch discount CSV: HTTP ${response.status}`);
+        }
+
         return new Promise((resolve, reject) => {
+            let rowCount = 0;
+            let errorCount = 0;
+
             response.data
                 .pipe(csv())
                 .on('data', (row) => {
+                    rowCount++;
                     const sku = row.sku?.toString().trim();
                     const price = parseFloat(row.discount);
                     
-                    if (sku && !isNaN(price) && price > 0) {
-                        discountPrices.set(sku, price);
-                        Logger.info(`Found discount for SKU ${sku}: ${price}`);
+                    if (!sku) {
+                        Logger.warn(`Row ${rowCount}: Empty SKU`);
+                        errorCount++;
+                        return;
                     }
+                    
+                    if (isNaN(price) || price <= 0) {
+                        Logger.warn(`Row ${rowCount}: Invalid price for SKU ${sku}: ${row.discount}`);
+                        errorCount++;
+                        return;
+                    }
+                    
+                    discountPrices.set(sku, price);
+                    Logger.info(`Found discount for SKU ${sku}: ${price}`);
                 })
                 .on('end', () => {
-                    Logger.info(`Loaded ${discountPrices.size} discount prices from CSV`);
+                    Logger.info(`Processed ${rowCount} rows from CSV`);
+                    Logger.info(`Found ${discountPrices.size} valid discount prices`);
+                    if (errorCount > 0) {
+                        Logger.warn(`Encountered ${errorCount} errors while processing discount prices`);
+                    }
                     resolve(discountPrices);
                 })
                 .on('error', (error) => {
@@ -694,6 +717,26 @@ function formatInventoryChange(oldQty, newQty) {
     return `${oldQty} → ${newQty} units`;
 }
 
+// Add this before the SKU matching loop
+const normalizeSkuForMatching = (sku) => {
+    // Remove leading zeros
+    const numericSku = sku.replace(/^0+/, '');
+    // Pad to 5 digits for matching
+    const paddedSku = numericSku.padStart(5, '0');
+    return [numericSku, paddedSku];
+};
+
+// Add this to the price update logic
+const validatePriceChange = (currentPrice, newPrice, threshold = 0.5) => {
+    // Check if price change is more than 50%
+    const changeRatio = Math.abs(newPrice - currentPrice) / currentPrice;
+    if (changeRatio > threshold) {
+        Logger.warn(`Large price change detected: ${formatPriceChange(currentPrice, newPrice)} (${(changeRatio * 100).toFixed(1)}% change)`);
+        return false;
+    }
+    return true;
+};
+
 async function main() {
     try {
         Timer.startTimer();
@@ -714,16 +757,22 @@ async function main() {
         Logger.info('Matching products with Shopify variants...');
 
         for (const [sku, data] of originalData) {
-            const paddedSku = sku.padStart(5, '0');
-            const numericSku = sku.replace(/^0+/, '');
+            const [numericSku, paddedSku] = normalizeSkuForMatching(sku);
+            // Try all possible SKU formats
+            const possibleSkus = new Set([sku, numericSku, paddedSku]);
             
-            if (shopifyVariants.has(paddedSku) || shopifyVariants.has(numericSku)) {
-                const variant = shopifyVariants.get(paddedSku) || shopifyVariants.get(numericSku);
-                const productName = variant.product?.title || 'Unknown Product';
-                Logger.info(`Matched SKU ${sku} to Shopify product "${productName}"`);
-                filteredData.set(sku, data);
-                matchedSkus.add(sku);
-            } else {
+            let matched = false;
+            for (const possibleSku of possibleSkus) {
+                if (shopifyVariants.has(possibleSku)) {
+                    const variant = shopifyVariants.get(possibleSku);
+                    filteredData.set(sku, data);
+                    matchedSkus.add(sku);
+                    matched = true;
+                    break;
+                }
+            }
+            
+            if (!matched) {
                 skippedSkus.add(sku);
             }
         }
@@ -775,7 +824,12 @@ async function main() {
             updated: 0,
             discountUpdated: 0,
             regularUpdated: 0,
-            failed: 0
+            priceUpdates: 0,
+            inventoryUpdates: 0,
+            skippedPriceUpdates: 0,
+            skippedInventoryUpdates: 0,
+            failed: 0,
+            matchRate: 0
         };
 
         // Process discount products
@@ -792,11 +846,17 @@ async function main() {
                 if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
                     const currentPrice = parseFloat(variant.price);
                     if (currentPrice !== data.discountPrice) {
-                        updates.price = data.discountPrice.toString();
-                        updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = data.price.toString();
-                        needsUpdate = true;
-                        changes.push(`Price: ${formatPriceChange(currentPrice, data.discountPrice)}`);
-                        changes.push(`Compare at Price: ${formatPriceChange(variant.compareAtPrice || variant.compare_at_price || 'None', data.price)}`);
+                        if (validatePriceChange(currentPrice, data.discountPrice)) {
+                            updates.price = data.discountPrice.toString();
+                            updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = data.price.toString();
+                            needsUpdate = true;
+                            changes.push(`Price: ${formatPriceChange(currentPrice, data.discountPrice)}`);
+                            changes.push(`Compare at Price: ${formatPriceChange(variant.compareAtPrice || variant.compare_at_price || 'None', data.price)}`);
+                            stats.priceUpdates++;
+                        } else {
+                            Logger.warn(`Skipping suspicious price update for SKU ${sku}`);
+                            stats.skippedPriceUpdates++;
+                        }
                     }
                 }
 
@@ -814,6 +874,7 @@ async function main() {
                         }
                         needsUpdate = true;
                         changes.push(`Inventory: ${formatInventoryChange(currentInventory, data.inventory)}`);
+                        stats.inventoryUpdates++;
                     }
                 }
 
@@ -843,12 +904,18 @@ async function main() {
                 if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
                     const currentPrice = parseFloat(variant.price);
                     if (currentPrice !== data.price) {
-                        updates.price = data.price.toString();
-                        updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = null;
-                        needsUpdate = true;
-                        changes.push(`Price: ${formatPriceChange(currentPrice, data.price)}`);
-                        if (variant.compareAtPrice || variant.compare_at_price) {
-                            changes.push(`Compare at Price: ${formatPriceChange(variant.compareAtPrice || variant.compare_at_price, 'None')}`);
+                        if (validatePriceChange(currentPrice, data.price)) {
+                            updates.price = data.price.toString();
+                            updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = null;
+                            needsUpdate = true;
+                            changes.push(`Price: ${formatPriceChange(currentPrice, data.price)}`);
+                            if (variant.compareAtPrice || variant.compare_at_price) {
+                                changes.push(`Compare at Price: ${formatPriceChange(variant.compareAtPrice || variant.compare_at_price, 'None')}`);
+                            }
+                            stats.priceUpdates++;
+                        } else {
+                            Logger.warn(`Skipping suspicious price update for SKU ${sku}`);
+                            stats.skippedPriceUpdates++;
                         }
                     }
                 }
@@ -867,6 +934,7 @@ async function main() {
                         }
                         needsUpdate = true;
                         changes.push(`Inventory: ${formatInventoryChange(currentInventory, data.inventory)}`);
+                        stats.inventoryUpdates++;
                     }
                 }
 
@@ -881,6 +949,15 @@ async function main() {
                 stats.failed++;
             }
         }
+
+        // At the end of processing, add:
+        stats.matchRate = (matchedSkus.size / originalData.size * 100).toFixed(2);
+        Logger.info('\nDetailed Statistics:');
+        Logger.info(`Match Rate: ${stats.matchRate}%`);
+        Logger.info(`Price Updates: ${stats.priceUpdates}`);
+        Logger.info(`Inventory Updates: ${stats.inventoryUpdates}`);
+        Logger.info(`Skipped Price Updates: ${stats.skippedPriceUpdates}`);
+        Logger.info(`Skipped Inventory Updates: ${stats.skippedInventoryUpdates}`);
 
         Logger.info('\nUpdate completed:');
         const duration = Timer.endTimer();
