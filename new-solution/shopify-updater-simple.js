@@ -405,12 +405,9 @@ async function getOriginalData() {
 function cleanNumericSku(sku) {
     if (!sku) return '';
     
-    // First, remove any leading 'R' or 'F' followed by a space or nothing
-    let cleaned = sku.toString().trim().replace(/^[RF]\s*/, '');
-    
-    // If the remaining string is purely numeric, return it
-    if (/^\d+$/.test(cleaned)) {
-        return cleaned;
+    // If the SKU is purely numeric, return it
+    if (/^\d+$/.test(sku.trim())) {
+        return sku.trim();
     }
     
     return ''; // Return empty string if not a pure numeric SKU
@@ -488,18 +485,12 @@ async function main() {
             const numericSku = cleanNumericSku(sku);
             
             if (numericSku && discountPrices.has(numericSku)) {
-                // Additional validation: only accept if original SKU starts with R or F followed by number
-                if (/^[RF]\s*\d+$/.test(sku.trim())) {
-                    const discountPrice = discountPrices.get(numericSku);
-                    discountProducts.set(sku, {
-                        ...data,
-                        discountPrice
-                    });
-                    Logger.info(`Marked SKU ${sku} for discount update (discount price: ${discountPrice})`);
-                } else {
-                    Logger.debug(`Skipping non-standard SKU format: ${sku}`);
-                    regularProducts.set(sku, data);
-                }
+                const discountPrice = discountPrices.get(numericSku);
+                discountProducts.set(sku, {
+                    ...data,
+                    discountPrice
+                });
+                Logger.info(`Marked SKU ${numericSku} for discount update (discount price: ${discountPrice})`);
             } else {
                 regularProducts.set(sku, data);
             }
