@@ -107,6 +107,7 @@ const Logger = {
         this.log(logMessage, 'ERROR');
     },
     warn(message) { this.log(message, 'WARN'); },
+    debug(message) { this.log(message, 'DEBUG'); },
 
     formatMessage(message, level = 'INFO') {
         let formattedMessage = message;
@@ -403,20 +404,18 @@ async function loadDiscountPrices() {
             response.data
                 .pipe(csv())
                 .on('data', (row) => {
-                    // Get SKU and discount from the correct column names
                     const sku = row.sku?.toString().trim();
-                    const price = parseFloat(row.discount); // Changed from discount_price to discount
+                    const price = parseFloat(row.discount);
                     
-                    // Only add if both SKU and price are valid
                     if (sku && !isNaN(price) && price > 0) {
                         discountPrices.set(sku, price);
-                        Logger.debug(`Loaded discount for SKU ${sku}: ${price}`); // Optional debug logging
+                        Logger.info(`Found discount for SKU ${sku}: ${price}`);
                     }
                 })
                 .on('end', () => {
                     Logger.info(`Loaded ${discountPrices.size} discount prices from CSV`);
                     if (discountPrices.size === 0) {
-                        Logger.warn('No valid discount prices found in CSV. CSV columns found: ' + 
+                        Logger.warn('No valid discount prices found in CSV. Available columns: ' + 
                             Object.keys(row || {}).join(', '));
                     }
                     resolve(discountPrices);
