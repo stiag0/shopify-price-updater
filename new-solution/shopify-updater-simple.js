@@ -533,7 +533,7 @@ async function loadDiscountPrices() {
             method: 'get',
             url: DISCOUNT_CSV_PATH,
             responseType: 'stream',
-            validateStatus: false // Allow non-200 status codes
+            validateStatus: false
         });
 
         if (response.status !== 200) {
@@ -563,8 +563,12 @@ async function loadDiscountPrices() {
                         return;
                     }
                     
+                    // Store both padded and non-padded versions of the SKU
+                    const [numericSku, paddedSku] = normalizeSkuForMatching(sku);
                     discountPrices.set(sku, price);
-                    Logger.info(`Found discount for SKU ${sku}: ${price}`);
+                    discountPrices.set(numericSku, price);
+                    discountPrices.set(paddedSku, price);
+                    Logger.info(`Found discount for SKU ${sku} (also matching ${numericSku}, ${paddedSku}): ${price}`);
                 })
                 .on('end', () => {
                     Logger.info(`Processed ${rowCount} rows from CSV`);
@@ -872,13 +876,19 @@ async function main() {
         const regularProducts = new Map();
 
         for (const [sku, data] of filteredData) {
-            if (discountPrices.has(sku)) {
+            const [numericSku, paddedSku] = normalizeSkuForMatching(sku);
+            // Try all possible SKU formats for discount matching
+            if (discountPrices.has(sku) || discountPrices.has(numericSku) || discountPrices.has(paddedSku)) {
+                // Get the discount price from whichever format matched
+                const discountPrice = discountPrices.get(sku) || discountPrices.get(numericSku) || discountPrices.get(paddedSku);
                 discountProducts.set(sku, {
                     ...data,
-                    discountPrice: discountPrices.get(sku)
+                    discountPrice: discountPrice
                 });
+                Logger.debug(`Marked SKU ${sku} as discount product with price ${discountPrice}`);
             } else {
                 regularProducts.set(sku, data);
+                Logger.debug(`Marked SKU ${sku} as regular product`);
             }
         }
 
