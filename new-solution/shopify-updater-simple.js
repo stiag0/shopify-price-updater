@@ -15,7 +15,8 @@ const {
     USE_REST_API = 'false', // Default to GraphQL if not specified
     LOCATION_ID, // Optional: For multi-location inventory
     UPDATE_MODE = 'both', // 'price', 'inventory', or 'both'
-    LOG_FILE_PATH = path.join('logs', `shopify-sync_${new Date().toISOString().replace(/T/, '_').replace(/:/g, '-').split('.')[0]}.log`)
+    LOG_FILE_PATH = path.join('logs', `shopify-sync_${new Date().toISOString().replace(/T/, '_').replace(/:/g, '-').split('.')[0]}.log`),
+    LIMIT = 250 // Maximum allowed by Shopify REST API for variants endpoint
 } = process.env;
 
 const SHOPIFY_API_VERSION = '2024-01';
@@ -23,6 +24,7 @@ const SHOPIFY_GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/ap
 const SHOPIFY_REST_BASE_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`;
 const MAX_RETRIES = 3;
 const RATE_LIMIT = USE_REST_API === 'true' ? 1 : 2; // More conservative rate limit for REST API
+const REST_API_LIMIT = 250; // Maximum allowed by Shopify REST API for variants endpoint
 
 // --- Validation ---
 if (!SHOPIFY_SHOP_NAME || !SHOPIFY_ACCESS_TOKEN || !DATA_API_URL || !INVENTORY_API_URL) {
@@ -518,20 +520,17 @@ async function getAllShopifyVariants() {
     const MAX_PAGES = 500;
 
     if (USE_REST_API === 'true') {
-        // REST API Implementation
-        let hasMorePages = true;
-        let page = 1;
-        const LIMIT = 250;  // Maximum allowed by Shopify REST API
-
-        while (hasMorePages && pageCount < MAX_PAGES) {
+        // REST API Implementation using Link header-based pagination
+        let nextUrl = `/variants.json?limit=${REST_API_LIMIT}`;  // Initial URL
+        
+        while (nextUrl && pageCount < MAX_PAGES) {
             try {
                 await shopifyLimiter.removeTokens(1);
-                const response = await axiosShopify.get(`/variants.json?limit=${LIMIT}&page=${page}`);
+                const response = await axiosShopify.get(nextUrl);
                 const variants = response.data.variants;
 
                 if (!variants || variants.length === 0) {
-                    hasMorePages = false;
-                    continue;
+                    break;
                 }
 
                 // Store only variants with numeric SKUs (1-5 digits)
@@ -549,7 +548,29 @@ async function getAllShopifyVariants() {
                     }
                 });
 
-                page++;
+                // Get the next URL from the Link header
+                const linkHeader = response.headers.link;
+                nextUrl = null;
+                
+                if (linkHeader) {
+                    const links = linkHeader.split(',');
+                    for (const link of links) {
+                        if (link.includes('rel="next"')) {
+                            // Extract URL from the link
+                            const matches = link.match(/<([^>]+)>/);
+                            if (matches) {
+                                // Convert full URL to relative path
+                                const fullUrl = matches[1];
+                                const urlParts = fullUrl.split('/admin/api/');
+                                if (urlParts.length > 1) {
+                                    nextUrl = '/' + urlParts[1];
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+
                 pageCount++;
                 Logger.info(`Fetched page ${pageCount} of variants using REST API...`);
 
