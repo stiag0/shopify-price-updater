@@ -349,9 +349,29 @@ async function getVariantBySku(sku) {
 }
 
 async function updateVariant(variantId, updates) {
-    return USE_REST_API === 'true' ? 
-        updateVariantRest(variantId, updates) : 
-        updateVariantGraphQL(variantId, updates);
+    if (USE_REST_API === 'true') {
+        // Convert GraphQL field names to REST API field names
+        const restUpdates = {
+            ...updates,
+            compare_at_price: updates.compareAtPrice,
+            inventory_quantity: updates.inventoryQuantity
+        };
+        delete restUpdates.compareAtPrice;
+        delete restUpdates.inventoryQuantity;
+        
+        return updateVariantRest(variantId, restUpdates);
+    } else {
+        return updateVariantGraphQL(variantId, updates);
+    }
+}
+
+async function updateInventoryLevel(inventoryItemId, locationId, quantity) {
+    if (USE_REST_API === 'true') {
+        // For REST API, inventory updates are handled through the variant update
+        return;
+    } else {
+        return updateInventoryLevelGraphQL(inventoryItemId, locationId, quantity);
+    }
 }
 
 // --- Main Functions ---
@@ -457,99 +477,218 @@ async function loadDiscountPrices() {
     }
 }
 
+async function getAllShopifyVariants() {
+    Logger.info('Fetching all product variants from Shopify...');
+    const allVariants = new Map();
+    let pageCount = 0;
+    const MAX_PAGES = 500;
+
+    if (USE_REST_API === 'true') {
+        // REST API Implementation
+        let hasMorePages = true;
+        let page = 1;
+        const LIMIT = 250;  // Maximum allowed by Shopify REST API
+
+        while (hasMorePages && pageCount < MAX_PAGES) {
+            try {
+                await shopifyLimiter.removeTokens(1);
+                const response = await axiosShopify.get(`/variants.json?limit=${LIMIT}&page=${page}`);
+                const variants = response.data.variants;
+
+                if (!variants || variants.length === 0) {
+                    hasMorePages = false;
+                    continue;
+                }
+
+                // Store only variants with numeric SKUs (1-5 digits)
+                variants.forEach(variant => {
+                    if (variant.sku && /^\d{1,5}$/.test(variant.sku)) {
+                        allVariants.set(variant.sku, {
+                            ...variant,
+                            compareAtPrice: variant.compare_at_price, // Normalize field name
+                            inventoryQuantity: variant.inventory_quantity,
+                            inventoryItem: {
+                                id: variant.inventory_item_id,
+                                tracked: true // REST API doesn't provide this info directly
+                            }
+                        });
+                    }
+                });
+
+                page++;
+                pageCount++;
+                Logger.info(`Fetched page ${pageCount} of variants using REST API...`);
+
+            } catch (error) {
+                Logger.error('Error fetching variants with REST API:', error);
+                throw error;
+            }
+        }
+    } else {
+        // GraphQL API Implementation
+        let hasNextPage = true;
+        let cursor = null;
+
+        const queryTemplate = `
+            query getVariants($first: Int!, $after: String) {
+                productVariants(first: $first, after: $after) {
+                    edges {
+                        node {
+                            id
+                            sku
+                            price
+                            compareAtPrice
+                            inventoryQuantity
+                            inventoryItem {
+                                id
+                                tracked
+                                inventoryLevels(first: 1) {
+                                    edges {
+                                        node {
+                                            quantities(names: "available") {
+                                                name
+                                                quantity
+                                            }
+                                            location {
+                                                id
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    pageInfo {
+                        hasNextPage
+                        endCursor
+                    }
+                }
+            }
+        `;
+
+        while (hasNextPage && pageCount < MAX_PAGES) {
+            try {
+                await shopifyLimiter.removeTokens(1);
+                const response = await axiosShopify.post('', {
+                    query: queryTemplate,
+                    variables: {
+                        first: 250,
+                        after: cursor
+                    }
+                });
+
+                if (response.data.errors) {
+                    throw new Error(JSON.stringify(response.data.errors));
+                }
+
+                const variants = response.data.data.productVariants;
+                
+                variants.edges.forEach(({ node }) => {
+                    if (node.sku && /^\d{1,5}$/.test(node.sku)) {
+                        allVariants.set(node.sku, node);
+                    }
+                });
+
+                hasNextPage = variants.pageInfo.hasNextPage;
+                cursor = variants.pageInfo.endCursor;
+                pageCount++;
+                
+                Logger.info(`Fetched page ${pageCount} of variants using GraphQL...`);
+            } catch (error) {
+                Logger.error('Error fetching variants with GraphQL:', error);
+                throw error;
+            }
+        }
+    }
+
+    Logger.info(`Found ${allVariants.size} compatible variants in Shopify`);
+    return allVariants;
+}
+
 async function main() {
     try {
         Timer.startTimer();
         Logger.info('Using ' + (USE_REST_API === 'true' ? 'REST API' : 'GraphQL API') + ' for Shopify operations');
         Logger.info(`Update mode: ${UPDATE_MODE}`);
         
+        // First, fetch all compatible Shopify variants
+        const shopifyVariants = await getAllShopifyVariants();
+        
         // Load original data from API
         const originalData = await getOriginalData();
         
-        // Load discount prices from CSV
+        // Filter original data to only include SKUs that exist in Shopify
+        const filteredData = new Map();
+        for (const [sku, data] of originalData) {
+            if (shopifyVariants.has(sku)) {
+                filteredData.set(sku, data);
+            }
+        }
+        
+        Logger.info(`Matched ${filteredData.size} products with Shopify variants`);
+        
+        // Load and filter discount prices
         let discountPrices = new Map();
         try {
-            discountPrices = await loadDiscountPrices();
+            const allDiscounts = await loadDiscountPrices();
+            // Only keep discounts for SKUs that exist in Shopify
+            for (const [sku, price] of allDiscounts) {
+                if (shopifyVariants.has(sku)) {
+                    discountPrices.set(sku, price);
+                }
+            }
+            Logger.info(`Found ${discountPrices.size} valid discount prices for existing Shopify variants`);
         } catch (error) {
             Logger.error('Failed to load discount prices, continuing without discounts:', error);
         }
 
-        // First, create a Set of valid numeric SKUs from discount CSV for faster lookup
-        const validDiscountSkus = new Set();
-        for (const [sku, price] of discountPrices) {
-            if (/^\d{1,5}$/.test(sku)) {
-                validDiscountSkus.add(sku);
-                Logger.info(`Registered valid discount SKU ${sku}: ${price}`);
-            }
-        }
-
-        // Separate products (all products in originalData are already numeric-only)
+        // Separate products into discount and regular (only for existing Shopify variants)
         const discountProducts = new Map();
         const regularProducts = new Map();
 
-        for (const [sku, data] of originalData) {
-            if (validDiscountSkus.has(sku)) {
-                const discountPrice = discountPrices.get(sku);
+        for (const [sku, data] of filteredData) {
+            if (discountPrices.has(sku)) {
                 discountProducts.set(sku, {
                     ...data,
-                    discountPrice
+                    discountPrice: discountPrices.get(sku)
                 });
-                Logger.info(`Matched SKU ${sku} for discount update (${discountPrice})`);
             } else {
                 regularProducts.set(sku, data);
             }
         }
 
-        Logger.info(`Found ${discountProducts.size} products with discounts to update`);
-        Logger.info(`Regular numeric products to process: ${regularProducts.size}`);
-
-        Logger.info('Starting updates...');
         const stats = {
-            total: originalData.size,
+            total: filteredData.size,
             updated: 0,
             discountUpdated: 0,
             regularUpdated: 0,
-            failed: 0,
-            skipped: 0
+            failed: 0
         };
 
-        // First process discount products (these need compare_at_price updates)
+        // Process discount products
         Logger.info(`Processing ${discountProducts.size} products with discounts...`);
         for (const [sku, data] of discountProducts) {
             try {
-                // Use original SKU format for Shopify operations
-                const variant = await getVariantBySku(sku);
-                if (!variant) {
-                    Logger.warn(`No variant found in Shopify for SKU ${sku}, skipping...`);
-                    stats.skipped++;
-                    continue;
-                }
-
+                const variant = shopifyVariants.get(sku);
                 const updates = {};
                 let needsUpdate = false;
 
                 if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
                     const currentPrice = parseFloat(variant.price);
                     if (currentPrice !== data.discountPrice) {
-                        if (USE_REST_API === 'true') {
-                            updates.price = data.discountPrice.toString();
-                            updates.compare_at_price = data.price.toString();
-                        } else {
-                            updates.price = data.discountPrice.toString();
-                            updates.compareAtPrice = data.price.toString();
-                        }
+                        updates.price = data.discountPrice.toString();
+                        updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = data.price.toString();
                         needsUpdate = true;
                     }
                 }
 
-                // Handle inventory updates for discount products
                 if (UPDATE_MODE === 'inventory' || UPDATE_MODE === 'both') {
                     const currentInventory = variant.inventoryQuantity || 0;
                     if (currentInventory !== data.inventory) {
                         if (USE_REST_API === 'true') {
                             updates.inventory_quantity = data.inventory;
                         } else if (variant.inventoryItem?.id && LOCATION_ID) {
-                            await updateInventoryLevelGraphQL(
+                            await updateInventoryLevel(
                                 variant.inventoryItem.id,
                                 LOCATION_ID,
                                 data.inventory - currentInventory
@@ -559,11 +698,8 @@ async function main() {
                     }
                 }
 
-                if (needsUpdate) {
-                    if (Object.keys(updates).length > 0) {
-                        await updateVariant(variant.id, updates);
-                    }
-                    Logger.info(`Updated discount product ${sku}: ${JSON.stringify(updates)}`);
+                if (needsUpdate && Object.keys(updates).length > 0) {
+                    await updateVariant(variant.id, updates);
                     stats.updated++;
                     stats.discountUpdated++;
                 }
@@ -573,18 +709,11 @@ async function main() {
             }
         }
 
-        // Then process regular products (no compare_at_price needed)
+        // Process regular products
         Logger.info(`Processing ${regularProducts.size} regular products...`);
         for (const [sku, data] of regularProducts) {
             try {
-                // Use original SKU format for Shopify operations
-                const variant = await getVariantBySku(sku);
-                if (!variant) {
-                    Logger.warn(`No variant found in Shopify for SKU ${sku}, skipping...`);
-                    stats.skipped++;
-                    continue;
-                }
-
+                const variant = shopifyVariants.get(sku);
                 const updates = {};
                 let needsUpdate = false;
 
@@ -592,37 +721,25 @@ async function main() {
                     const currentPrice = parseFloat(variant.price);
                     if (currentPrice !== data.price) {
                         updates.price = data.price.toString();
-                        if (USE_REST_API === 'true') {
-                            updates.compare_at_price = null;  // Clear any existing compare_at_price
-                        } else {
-                            updates.compareAtPrice = null;  // Clear any existing compareAtPrice
-                        }
+                        updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = null;
                         needsUpdate = true;
                     }
                 }
 
-                // Handle inventory updates for regular products
                 if (UPDATE_MODE === 'inventory' || UPDATE_MODE === 'both') {
                     const currentInventory = variant.inventoryQuantity || 0;
-                    if (currentInventory !== data.inventory) {
-                        if (USE_REST_API === 'true') {
-                            updates.inventory_quantity = data.inventory;
-                        } else if (variant.inventoryItem?.id && LOCATION_ID) {
-                            await updateInventoryLevelGraphQL(
-                                variant.inventoryItem.id,
-                                LOCATION_ID,
-                                data.inventory - currentInventory
-                            );
-                        }
+                    if (currentInventory !== data.inventory && variant.inventoryItem?.id && LOCATION_ID) {
+                        await updateInventoryLevel(
+                            variant.inventoryItem.id,
+                            LOCATION_ID,
+                            data.inventory - currentInventory
+                        );
                         needsUpdate = true;
                     }
                 }
 
-                if (needsUpdate) {
-                    if (Object.keys(updates).length > 0) {
-                        await updateVariant(variant.id, updates);
-                    }
-                    Logger.info(`Updated regular product ${sku}: ${JSON.stringify(updates)}`);
+                if (needsUpdate && Object.keys(updates).length > 0) {
+                    await updateVariant(variant.id, updates);
                     stats.updated++;
                     stats.regularUpdated++;
                 }
@@ -635,11 +752,10 @@ async function main() {
         Logger.info('\nUpdate completed:');
         const duration = Timer.endTimer();
         Logger.info(`Total execution time: ${duration}`);
-        Logger.info(`Total products processed: ${stats.total}`);
+        Logger.info(`Total products matched with Shopify: ${stats.total}`);
         Logger.info(`Discount products updated: ${stats.discountUpdated}`);
         Logger.info(`Regular products updated: ${stats.regularUpdated}`);
         Logger.info(`Total updated: ${stats.updated}`);
-        Logger.info(`Skipped: ${stats.skipped}`);
         Logger.info(`Failed: ${stats.failed}`);
 
     } catch (error) {
