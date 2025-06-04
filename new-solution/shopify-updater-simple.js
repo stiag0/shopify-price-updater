@@ -201,12 +201,17 @@ async function getVariantBySkuRest(sku) {
 async function updateVariantRest(variantId, updates) {
     try {
         await shopifyLimiter.removeTokens(1);
-        const response = await axiosShopify.put(`/variants/${variantId}.json`, {
-            variant: {
-                id: variantId,
-                ...updates
+        // Extract numeric ID from variantId if it's a Shopify GID
+        const numericId = variantId.includes('/') ? variantId.split('/').pop() : variantId;
+        const response = await axiosShopify.put(
+            `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/variants/${numericId}.json`,
+            {
+                variant: {
+                    id: numericId,
+                    ...updates
+                }
             }
-        });
+        );
         return response.data.variant;
     } catch (error) {
         console.error('REST API Error updating variant:', error.response?.data || error.message);
