@@ -539,6 +539,10 @@ async function getAllShopifyVariants() {
                             price
                             compareAtPrice
                             inventoryQuantity
+                            displayName
+                            product {
+                                title
+                            }
                             inventoryItem {
                                 id
                                 tracked
@@ -603,6 +607,17 @@ async function getAllShopifyVariants() {
 
     Logger.info(`Found ${allVariants.size} compatible variants in Shopify`);
     return allVariants;
+}
+
+// Add a helper function to format price changes
+function formatPriceChange(oldPrice, newPrice) {
+    const formatPrice = (price) => `$${parseFloat(price).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+    return `${formatPrice(oldPrice)} → ${formatPrice(newPrice)}`;
+}
+
+// Add a helper function to format inventory changes
+function formatInventoryChange(oldQty, newQty) {
+    return `${oldQty} → ${newQty} units`;
 }
 
 async function main() {
@@ -670,8 +685,11 @@ async function main() {
         for (const [sku, data] of discountProducts) {
             try {
                 const variant = shopifyVariants.get(sku);
+                const productName = variant.product?.title || 'Unknown Product';
+                const variantName = variant.displayName || sku;
                 const updates = {};
                 let needsUpdate = false;
+                let changes = [];
 
                 if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
                     const currentPrice = parseFloat(variant.price);
@@ -679,6 +697,8 @@ async function main() {
                         updates.price = data.discountPrice.toString();
                         updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = data.price.toString();
                         needsUpdate = true;
+                        changes.push(`Price: ${formatPriceChange(currentPrice, data.discountPrice)}`);
+                        changes.push(`Compare at Price: ${formatPriceChange(variant.compareAtPrice || variant.compare_at_price || 'None', data.price)}`);
                     }
                 }
 
@@ -695,11 +715,13 @@ async function main() {
                             );
                         }
                         needsUpdate = true;
+                        changes.push(`Inventory: ${formatInventoryChange(currentInventory, data.inventory)}`);
                     }
                 }
 
                 if (needsUpdate && Object.keys(updates).length > 0) {
                     await updateVariant(variant.id, updates);
+                    Logger.info(`✅ Updated discount product "${productName}" (${variantName}):\n   ${changes.join('\n   ')}`);
                     stats.updated++;
                     stats.discountUpdated++;
                 }
@@ -714,8 +736,11 @@ async function main() {
         for (const [sku, data] of regularProducts) {
             try {
                 const variant = shopifyVariants.get(sku);
+                const productName = variant.product?.title || 'Unknown Product';
+                const variantName = variant.displayName || sku;
                 const updates = {};
                 let needsUpdate = false;
+                let changes = [];
 
                 if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
                     const currentPrice = parseFloat(variant.price);
@@ -723,23 +748,33 @@ async function main() {
                         updates.price = data.price.toString();
                         updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = null;
                         needsUpdate = true;
+                        changes.push(`Price: ${formatPriceChange(currentPrice, data.price)}`);
+                        if (variant.compareAtPrice || variant.compare_at_price) {
+                            changes.push(`Compare at Price: ${formatPriceChange(variant.compareAtPrice || variant.compare_at_price, 'None')}`);
+                        }
                     }
                 }
 
                 if (UPDATE_MODE === 'inventory' || UPDATE_MODE === 'both') {
                     const currentInventory = variant.inventoryQuantity || 0;
-                    if (currentInventory !== data.inventory && variant.inventoryItem?.id && LOCATION_ID) {
-                        await updateInventoryLevel(
-                            variant.inventoryItem.id,
-                            LOCATION_ID,
-                            data.inventory - currentInventory
-                        );
+                    if (currentInventory !== data.inventory) {
+                        if (USE_REST_API === 'true') {
+                            updates.inventory_quantity = data.inventory;
+                        } else if (variant.inventoryItem?.id && LOCATION_ID) {
+                            await updateInventoryLevel(
+                                variant.inventoryItem.id,
+                                LOCATION_ID,
+                                data.inventory - currentInventory
+                            );
+                        }
                         needsUpdate = true;
+                        changes.push(`Inventory: ${formatInventoryChange(currentInventory, data.inventory)}`);
                     }
                 }
 
                 if (needsUpdate && Object.keys(updates).length > 0) {
                     await updateVariant(variant.id, updates);
+                    Logger.info(`✅ Updated regular product "${productName}" (${variantName}):\n   ${changes.join('\n   ')}`);
                     stats.updated++;
                     stats.regularUpdated++;
                 }
