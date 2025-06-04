@@ -389,24 +389,48 @@ async function getOriginalData() {
 }
 
 async function loadDiscountPrices() {
-    return new Promise((resolve, reject) => {
-        const discountPrices = new Map();
+    const discountPrices = new Map();
+    
+    try {
+        let csvStream;
         
-        fs.createReadStream(DISCOUNT_CSV_PATH)
-            .pipe(csv())
-            .on('data', (row) => {
-                const sku = row.sku?.toString().trim();
-                const price = parseFloat(row.discount_price);
-                if (sku && !isNaN(price)) {
-                    discountPrices.set(sku, price);
-                }
-            })
-            .on('end', () => {
-                Logger.info(`Loaded ${discountPrices.size} discount prices from CSV`);
-                resolve(discountPrices);
-            })
-            .on('error', reject);
-    });
+        // Check if the path is a URL
+        if (DISCOUNT_CSV_PATH.startsWith('http')) {
+            Logger.info('Fetching discount CSV from URL...');
+            const response = await axios({
+                method: 'get',
+                url: DISCOUNT_CSV_PATH,
+                responseType: 'stream'
+            });
+            csvStream = response.data;
+        } else {
+            Logger.info('Reading local discount CSV file...');
+            csvStream = fs.createReadStream(DISCOUNT_CSV_PATH);
+        }
+
+        return new Promise((resolve, reject) => {
+            csvStream
+                .pipe(csv())
+                .on('data', (row) => {
+                    const sku = row.sku?.toString().trim();
+                    const price = parseFloat(row.discount_price);
+                    if (sku && !isNaN(price)) {
+                        discountPrices.set(sku, price);
+                    }
+                })
+                .on('end', () => {
+                    Logger.info(`Loaded ${discountPrices.size} discount prices from CSV`);
+                    resolve(discountPrices);
+                })
+                .on('error', (error) => {
+                    Logger.error('Error reading discount CSV:', error);
+                    reject(error);
+                });
+        });
+    } catch (error) {
+        Logger.error('Error loading discount prices:', error);
+        throw error;
+    }
 }
 
 async function main() {
@@ -417,10 +441,12 @@ async function main() {
         // Load original data from API
         const originalData = await getOriginalData();
         
-        // Load discount prices from CSV if they exist
+        // Load discount prices from CSV
         let discountPrices = new Map();
-        if (fs.existsSync(DISCOUNT_CSV_PATH)) {
+        try {
             discountPrices = await loadDiscountPrices();
+        } catch (error) {
+            Logger.error('Failed to load discount prices, continuing without discounts:', error);
         }
 
         Logger.info('Starting updates...');
