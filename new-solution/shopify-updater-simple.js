@@ -427,14 +427,31 @@ async function main() {
         const stats = {
             total: originalData.size,
             updated: 0,
+            discountUpdated: 0,
+            regularUpdated: 0,
             failed: 0,
             skipped: 0
         };
 
-        // Process each SKU
+        // Separate products into discount and regular lists
+        const discountProducts = new Map();
+        const regularProducts = new Map();
+
         for (const [sku, data] of originalData) {
+            if (discountPrices.has(sku)) {
+                discountProducts.set(sku, {
+                    ...data,
+                    discountPrice: discountPrices.get(sku)
+                });
+            } else {
+                regularProducts.set(sku, data);
+            }
+        }
+
+        // First process discount products (these need compare_at_price updates)
+        Logger.info(`Processing ${discountProducts.size} products with discounts...`);
+        for (const [sku, data] of discountProducts) {
             try {
-                // Get the variant from Shopify
                 const variant = await getVariantBySku(sku);
                 if (!variant) {
                     Logger.warn(`No variant found in Shopify for SKU ${sku}, skipping...`);
@@ -445,40 +462,27 @@ async function main() {
                 const updates = {};
                 let needsUpdate = false;
 
-                // Handle price updates if enabled
                 if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
-                    const targetPrice = discountPrices.has(sku) ? discountPrices.get(sku) : data.price;
                     const currentPrice = parseFloat(variant.price);
-                    
-                    if (currentPrice !== targetPrice) {
-                        updates.price = targetPrice.toString();
-                        if (discountPrices.has(sku)) {
-                            // Use the correct field name based on API type
-                            if (USE_REST_API === 'true') {
-                                updates.compare_at_price = data.price.toString();
-                            } else {
-                                updates.compareAtPrice = data.price.toString();
-                            }
+                    if (currentPrice !== data.discountPrice) {
+                        if (USE_REST_API === 'true') {
+                            updates.price = data.discountPrice.toString();
+                            updates.compare_at_price = data.price.toString();
                         } else {
-                            // Clear compare at price when not using discount
-                            if (USE_REST_API === 'true') {
-                                updates.compare_at_price = null;
-                            } else {
-                                updates.compareAtPrice = null;
-                            }
+                            updates.price = data.discountPrice.toString();
+                            updates.compareAtPrice = data.price.toString();
                         }
                         needsUpdate = true;
                     }
                 }
 
-                // Handle inventory updates if enabled
+                // Handle inventory updates for discount products
                 if (UPDATE_MODE === 'inventory' || UPDATE_MODE === 'both') {
                     const currentInventory = variant.inventoryQuantity || 0;
                     if (currentInventory !== data.inventory) {
                         if (USE_REST_API === 'true') {
                             updates.inventory_quantity = data.inventory;
                         } else if (variant.inventoryItem?.id && LOCATION_ID) {
-                            // For GraphQL, we'll update inventory separately
                             await updateInventoryLevelGraphQL(
                                 variant.inventoryItem.id,
                                 LOCATION_ID,
@@ -493,22 +497,79 @@ async function main() {
                     if (Object.keys(updates).length > 0) {
                         await updateVariant(variant.id, updates);
                     }
-                    Logger.info(`Updated ${sku}: ${JSON.stringify(updates)}`);
+                    Logger.info(`Updated discount product ${sku}: ${JSON.stringify(updates)}`);
                     stats.updated++;
-                } else {
-                    Logger.info(`No updates needed for ${sku}`);
-                    stats.skipped++;
+                    stats.discountUpdated++;
                 }
             } catch (error) {
-                Logger.error(`Failed to process SKU ${sku}:`);
-                Logger.error(error.message);
+                Logger.error(`Failed to process discount SKU ${sku}:`, error);
+                stats.failed++;
+            }
+        }
+
+        // Then process regular products (no compare_at_price needed)
+        Logger.info(`Processing ${regularProducts.size} regular products...`);
+        for (const [sku, data] of regularProducts) {
+            try {
+                const variant = await getVariantBySku(sku);
+                if (!variant) {
+                    Logger.warn(`No variant found in Shopify for SKU ${sku}, skipping...`);
+                    stats.skipped++;
+                    continue;
+                }
+
+                const updates = {};
+                let needsUpdate = false;
+
+                if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
+                    const currentPrice = parseFloat(variant.price);
+                    if (currentPrice !== data.price) {
+                        updates.price = data.price.toString();
+                        if (USE_REST_API === 'true') {
+                            updates.compare_at_price = null;  // Clear any existing compare_at_price
+                        } else {
+                            updates.compareAtPrice = null;  // Clear any existing compareAtPrice
+                        }
+                        needsUpdate = true;
+                    }
+                }
+
+                // Handle inventory updates for regular products
+                if (UPDATE_MODE === 'inventory' || UPDATE_MODE === 'both') {
+                    const currentInventory = variant.inventoryQuantity || 0;
+                    if (currentInventory !== data.inventory) {
+                        if (USE_REST_API === 'true') {
+                            updates.inventory_quantity = data.inventory;
+                        } else if (variant.inventoryItem?.id && LOCATION_ID) {
+                            await updateInventoryLevelGraphQL(
+                                variant.inventoryItem.id,
+                                LOCATION_ID,
+                                data.inventory - currentInventory
+                            );
+                        }
+                        needsUpdate = true;
+                    }
+                }
+
+                if (needsUpdate) {
+                    if (Object.keys(updates).length > 0) {
+                        await updateVariant(variant.id, updates);
+                    }
+                    Logger.info(`Updated regular product ${sku}: ${JSON.stringify(updates)}`);
+                    stats.updated++;
+                    stats.regularUpdated++;
+                }
+            } catch (error) {
+                Logger.error(`Failed to process regular SKU ${sku}:`, error);
                 stats.failed++;
             }
         }
 
         Logger.info('\nUpdate completed:');
-        Logger.info(`Total products: ${stats.total}`);
-        Logger.info(`Updated: ${stats.updated}`);
+        Logger.info(`Total products processed: ${stats.total}`);
+        Logger.info(`Discount products updated: ${stats.discountUpdated}`);
+        Logger.info(`Regular products updated: ${stats.regularUpdated}`);
+        Logger.info(`Total updated: ${stats.updated}`);
         Logger.info(`Skipped: ${stats.skipped}`);
         Logger.info(`Failed: ${stats.failed}`);
 
