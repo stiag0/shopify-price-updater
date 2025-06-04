@@ -405,9 +405,12 @@ async function getOriginalData() {
 function cleanNumericSku(sku) {
     if (!sku) return '';
     
-    // If the SKU is purely numeric, return it
-    if (/^\d+$/.test(sku.trim())) {
-        return sku.trim();
+    // Remove leading zeros and any whitespace
+    const cleaned = sku.toString().trim().replace(/^0+/, '');
+    
+    // If the remaining string is purely numeric, return it
+    if (/^\d+$/.test(cleaned)) {
+        return cleaned;
     }
     
     return ''; // Return empty string if not a pure numeric SKU
@@ -490,7 +493,7 @@ async function main() {
                     ...data,
                     discountPrice
                 });
-                Logger.info(`Marked SKU ${numericSku} for discount update (discount price: ${discountPrice})`);
+                Logger.info(`Marked SKU ${sku} (normalized: ${numericSku}) for discount update (discount price: ${discountPrice})`);
             } else {
                 regularProducts.set(sku, data);
             }
