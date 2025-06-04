@@ -15,7 +15,7 @@ const {
     USE_REST_API = 'false', // Default to GraphQL if not specified
     LOCATION_ID, // Optional: For multi-location inventory
     UPDATE_MODE = 'both', // 'price', 'inventory', or 'both'
-    LOG_FILE_PATH = path.join('logs', `shopify-sync_${new Date().toISOString().replace(/:/g, '-')}.log`)
+    LOG_FILE_PATH = path.join('logs', `shopify-sync_${new Date().toISOString().replace(/T/, '_').replace(/:/g, '-').split('.')[0]}.log`)
 } = process.env;
 
 const SHOPIFY_API_VERSION = '2024-01';
@@ -142,6 +142,31 @@ const Logger = {
 
 // Initialize logger
 Logger.init();
+
+// --- Timer Utility ---
+const Timer = {
+    start: null,
+    end: null,
+    
+    startTimer() {
+        this.start = process.hrtime();
+    },
+    
+    endTimer() {
+        this.end = process.hrtime(this.start);
+        return this.getFormattedDuration();
+    },
+    
+    getFormattedDuration() {
+        const durationInSeconds = this.end[0] + this.end[1] / 1e9;
+        const hours = Math.floor(durationInSeconds / 3600);
+        const minutes = Math.floor((durationInSeconds % 3600) / 60);
+        const seconds = Math.floor(durationInSeconds % 60);
+        const milliseconds = Math.floor((durationInSeconds % 1) * 1000);
+        
+        return `${hours}h ${minutes}m ${seconds}s ${milliseconds}ms`;
+    }
+};
 
 // --- Helper Functions ---
 async function fetchWithRetry(config, retries = MAX_RETRIES) {
@@ -434,6 +459,7 @@ async function loadDiscountPrices() {
 
 async function main() {
     try {
+        Timer.startTimer();
         Logger.info('Using ' + (USE_REST_API === 'true' ? 'REST API' : 'GraphQL API') + ' for Shopify operations');
         Logger.info(`Update mode: ${UPDATE_MODE}`);
         
@@ -607,6 +633,8 @@ async function main() {
         }
 
         Logger.info('\nUpdate completed:');
+        const duration = Timer.endTimer();
+        Logger.info(`Total execution time: ${duration}`);
         Logger.info(`Total products processed: ${stats.total}`);
         Logger.info(`Discount products updated: ${stats.discountUpdated}`);
         Logger.info(`Regular products updated: ${stats.regularUpdated}`);
@@ -615,24 +643,28 @@ async function main() {
         Logger.info(`Failed: ${stats.failed}`);
 
     } catch (error) {
-        Logger.error(`Fatal error: ${error.message}`);
+        const duration = Timer.endTimer();
+        Logger.error(`Fatal error after ${duration}: ${error.message}`);
         process.exit(1);
     }
 }
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
-    Logger.info('\nReceived SIGINT. Graceful shutdown initiated.');
+    const duration = Timer.endTimer();
+    Logger.info(`\nReceived SIGINT after ${duration}. Graceful shutdown initiated.`);
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-    Logger.info('\nReceived SIGTERM. Graceful shutdown initiated.');
+    const duration = Timer.endTimer();
+    Logger.info(`\nReceived SIGTERM after ${duration}. Graceful shutdown initiated.`);
     process.exit(0);
 });
 
 // Run the updater
 main().catch(error => {
-    Logger.error(`Fatal error: ${error.message}`);
+    const duration = Timer.endTimer();
+    Logger.error(`Fatal error after ${duration}: ${error.message}`);
     process.exit(1);
 }); 
