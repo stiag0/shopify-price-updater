@@ -264,7 +264,12 @@ async function getOriginalData() {
             const sku = (item.Referencia || item.CodigoProducto || '').toString().trim();
             if (dataMap.has(sku)) {
                 const existingData = dataMap.get(sku);
-                existingData.inventory = parseInt(item.Existencia || item.Cantidad || 0, 10);
+                // Calculate real inventory: Initial + Entries - Exits
+                const realInventory = parseFloat(item.CantidadInicial || 0) + 
+                                    parseFloat(item.CantidadEntradas || 0) - 
+                                    parseFloat(item.CantidadSalidas || 0);
+                
+                existingData.inventory = Math.max(0, Math.round(realInventory));  // Ensure non-negative
                 dataMap.set(sku, existingData);
             }
         }
