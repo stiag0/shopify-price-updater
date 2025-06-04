@@ -14,7 +14,8 @@ const {
     DISCOUNT_CSV_PATH = 'discounts.csv',
     USE_REST_API = 'false', // Default to GraphQL if not specified
     LOCATION_ID, // Optional: For multi-location inventory
-    UPDATE_MODE = 'both' // 'price', 'inventory', or 'both'
+    UPDATE_MODE = 'both', // 'price', 'inventory', or 'both'
+    LOG_FILE_PATH = path.join('logs', `shopify-sync_${new Date().toISOString().replace(/:/g, '-')}.log`)
 } = process.env;
 
 const SHOPIFY_API_VERSION = '2024-01';
@@ -40,6 +41,62 @@ const axiosShopify = axios.create({
         'Content-Type': 'application/json',
     }
 });
+
+// --- Logger Module ---
+const Logger = {
+    logDir: path.dirname(LOG_FILE_PATH),
+    logPath: LOG_FILE_PATH,
+    logQueue: [],
+    isWriting: false,
+
+    init() {
+        if (!fs.existsSync(this.logDir)) {
+            fs.mkdirSync(this.logDir, { recursive: true });
+        }
+        fs.writeFileSync(this.logPath, `[${new Date().toISOString()}] [INFO] Logger initialized\n`);
+    },
+
+    log(message, level = 'INFO') {
+        const timestamp = new Date().toISOString();
+        const logEntry = `[${timestamp}] [${level}] ${message}\n`;
+        
+        // Always show in console
+        if (level === 'ERROR') {
+            console.error(message);
+        } else {
+            console.log(message);
+        }
+
+        // Queue for file writing
+        this.logQueue.push(logEntry);
+        this.processQueue();
+    },
+
+    async processQueue() {
+        if (this.isWriting || this.logQueue.length === 0) return;
+        
+        this.isWriting = true;
+        try {
+            const content = this.logQueue.join('');
+            await fs.promises.appendFile(this.logPath, content, 'utf8');
+            this.logQueue = [];
+        } catch (error) {
+            console.error('Error writing to log file:', error);
+        } finally {
+            this.isWriting = false;
+            if (this.logQueue.length > 0) {
+                setImmediate(() => this.processQueue());
+            }
+        }
+    },
+
+    info(message) { this.log(message, 'INFO'); },
+    error(message) { this.log(message, 'ERROR'); },
+    warn(message) { this.log(message, 'WARN'); }
+};
+
+// Initialize logger
+Logger.init();
 
 // --- Helper Functions ---
 async function fetchWithRetry(config, retries = MAX_RETRIES) {
@@ -230,7 +287,7 @@ async function updateVariant(variantId, updates) {
 // --- Main Functions ---
 async function getOriginalData() {
     try {
-        console.log('Fetching data from API...');
+        Logger.info('Fetching data from API...');
         const response = await fetchWithRetry({ url: DATA_API_URL });
         
         // Handle OData response structure
@@ -255,7 +312,7 @@ async function getOriginalData() {
         }
         
         // Now fetch inventory data
-        console.log('Fetching inventory data...');
+        Logger.info('Fetching inventory data...');
         const invResponse = await fetchWithRetry({ url: INVENTORY_API_URL });
         const inventory = invResponse.data.value || [];
 
@@ -274,12 +331,14 @@ async function getOriginalData() {
             }
         }
         
-        console.log(`Loaded ${dataMap.size} products from API`);
+        Logger.info(`Loaded ${dataMap.size} products from API`);
         return dataMap;
     } catch (error) {
-        console.error('Error fetching data:', error.message);
+        Logger.error('Error fetching data:');
+        Logger.error(error.message);
         if (error.response?.data) {
-            console.error('API Response:', JSON.stringify(error.response.data, null, 2));
+            Logger.error('API Response:');
+            Logger.error(JSON.stringify(error.response.data, null, 2));
         }
         throw error;
     }
@@ -299,7 +358,7 @@ async function loadDiscountPrices() {
                 }
             })
             .on('end', () => {
-                console.log(`Loaded ${discountPrices.size} discount prices from CSV`);
+                Logger.info(`Loaded ${discountPrices.size} discount prices from CSV`);
                 resolve(discountPrices);
             })
             .on('error', reject);
@@ -308,8 +367,8 @@ async function loadDiscountPrices() {
 
 async function main() {
     try {
-        console.log(`Using ${USE_REST_API === 'true' ? 'REST API' : 'GraphQL API'} for Shopify operations`);
-        console.log(`Update mode: ${UPDATE_MODE}`);
+        Logger.info('Using ' + (USE_REST_API === 'true' ? 'REST API' : 'GraphQL API') + ' for Shopify operations');
+        Logger.info(`Update mode: ${UPDATE_MODE}`);
         
         // Load original data from API
         const originalData = await getOriginalData();
@@ -320,7 +379,7 @@ async function main() {
             discountPrices = await loadDiscountPrices();
         }
 
-        console.log('Starting updates...');
+        Logger.info('Starting updates...');
         const stats = {
             total: originalData.size,
             updated: 0,
@@ -334,7 +393,7 @@ async function main() {
                 // Get the variant from Shopify
                 const variant = await getVariantBySku(sku);
                 if (!variant) {
-                    console.warn(`No variant found in Shopify for SKU ${sku}, skipping...`);
+                    Logger.warn(`No variant found in Shopify for SKU ${sku}, skipping...`);
                     stats.skipped++;
                     continue;
                 }
@@ -378,43 +437,44 @@ async function main() {
                     if (Object.keys(updates).length > 0) {
                         await updateVariant(variant.id, updates);
                     }
-                    console.log(`Updated ${sku}: ${JSON.stringify(updates)}`);
+                    Logger.info(`Updated ${sku}: ${JSON.stringify(updates)}`);
                     stats.updated++;
                 } else {
-                    console.log(`No updates needed for ${sku}`);
+                    Logger.info(`No updates needed for ${sku}`);
                     stats.skipped++;
                 }
             } catch (error) {
-                console.error(`Failed to process SKU ${sku}:`, error.message);
+                Logger.error(`Failed to process SKU ${sku}:`);
+                Logger.error(error.message);
                 stats.failed++;
             }
         }
 
-        console.log('\nUpdate completed:');
-        console.log(`Total products: ${stats.total}`);
-        console.log(`Updated: ${stats.updated}`);
-        console.log(`Skipped: ${stats.skipped}`);
-        console.log(`Failed: ${stats.failed}`);
+        Logger.info('\nUpdate completed:');
+        Logger.info(`Total products: ${stats.total}`);
+        Logger.info(`Updated: ${stats.updated}`);
+        Logger.info(`Skipped: ${stats.skipped}`);
+        Logger.info(`Failed: ${stats.failed}`);
 
     } catch (error) {
-        console.error('Fatal error:', error.message);
+        Logger.error(`Fatal error: ${error.message}`);
         process.exit(1);
     }
 }
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
-    console.log('\nReceived SIGINT. Graceful shutdown initiated.');
+    Logger.info('\nReceived SIGINT. Graceful shutdown initiated.');
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-    console.log('\nReceived SIGTERM. Graceful shutdown initiated.');
+    Logger.info('\nReceived SIGTERM. Graceful shutdown initiated.');
     process.exit(0);
 });
 
 // Run the updater
 main().catch(error => {
-    console.error('Fatal error:', error.message);
+    Logger.error(`Fatal error: ${error.message}`);
     process.exit(1);
 }); 
