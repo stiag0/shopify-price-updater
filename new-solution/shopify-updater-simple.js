@@ -404,9 +404,16 @@ async function getOriginalData() {
 
 function cleanNumericSku(sku) {
     if (!sku) return '';
-    // Extract only numbers from the SKU
-    const numericSku = sku.toString().replace(/[^0-9]/g, '');
-    return numericSku;
+    
+    // First, remove any leading 'R' or 'F' followed by a space or nothing
+    let cleaned = sku.toString().trim().replace(/^[RF]\s*/, '');
+    
+    // If the remaining string is purely numeric, return it
+    if (/^\d+$/.test(cleaned)) {
+        return cleaned;
+    }
+    
+    return ''; // Return empty string if not a pure numeric SKU
 }
 
 async function loadDiscountPrices() {
@@ -478,16 +485,21 @@ async function main() {
         const regularProducts = new Map();
 
         for (const [sku, data] of originalData) {
-            // Clean the SKU to numeric only
             const numericSku = cleanNumericSku(sku);
             
             if (numericSku && discountPrices.has(numericSku)) {
-                const discountPrice = discountPrices.get(numericSku);
-                discountProducts.set(sku, {
-                    ...data,
-                    discountPrice
-                });
-                Logger.info(`Marked SKU ${sku} (numeric: ${numericSku}) for discount update (discount price: ${discountPrice})`);
+                // Additional validation: only accept if original SKU starts with R or F followed by number
+                if (/^[RF]\s*\d+$/.test(sku.trim())) {
+                    const discountPrice = discountPrices.get(numericSku);
+                    discountProducts.set(sku, {
+                        ...data,
+                        discountPrice
+                    });
+                    Logger.info(`Marked SKU ${sku} for discount update (discount price: ${discountPrice})`);
+                } else {
+                    Logger.debug(`Skipping non-standard SKU format: ${sku}`);
+                    regularProducts.set(sku, data);
+                }
             } else {
                 regularProducts.set(sku, data);
             }
