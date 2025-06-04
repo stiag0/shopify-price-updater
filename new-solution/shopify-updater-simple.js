@@ -37,7 +37,6 @@ const shopifyLimiter = new RateLimiter({ tokensPerInterval: RATE_LIMIT, interval
 
 // Axios instances for different endpoints
 const axiosShopify = axios.create({
-    baseURL: USE_REST_API === 'true' ? SHOPIFY_REST_BASE_URL : SHOPIFY_GRAPHQL_URL,
     headers: {
         'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
         'Content-Type': 'application/json',
@@ -521,11 +520,12 @@ async function getAllShopifyVariants() {
 
     if (USE_REST_API === 'true') {
         // REST API Implementation using Link header-based pagination
-        let nextUrl = `/products.json?limit=${REST_API_LIMIT}&fields=id,variants`;  // Get products with their variants
+        let nextUrl = `/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=${REST_API_LIMIT}&fields=id,title,variants`;  // Include full path and fields
         
         while (nextUrl && pageCount < MAX_PAGES) {
             try {
                 await shopifyLimiter.removeTokens(1);
+                Logger.debug(`Requesting URL: ${nextUrl}`); // Add debug logging
                 const response = await axiosShopify.get(nextUrl);
                 const products = response.data.products;
 
@@ -569,10 +569,7 @@ async function getAllShopifyVariants() {
                             if (matches) {
                                 // Convert full URL to relative path
                                 const fullUrl = matches[1];
-                                const urlParts = fullUrl.split('/admin/api/');
-                                if (urlParts.length > 1) {
-                                    nextUrl = '/' + urlParts[1];
-                                }
+                                nextUrl = fullUrl.substring(fullUrl.indexOf('/admin/api/')); // Keep the full admin/api path
                             }
                             break;
                         }
@@ -580,7 +577,7 @@ async function getAllShopifyVariants() {
                 }
 
                 pageCount++;
-                Logger.info(`Fetched page ${pageCount} of products using REST API...`);
+                Logger.info(`Fetched page ${pageCount} of products using REST API (${products.length} products)...`);
 
             } catch (error) {
                 Logger.error('Error fetching variants with REST API:', error);
