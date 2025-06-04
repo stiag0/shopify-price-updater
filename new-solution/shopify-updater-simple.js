@@ -232,17 +232,40 @@ async function getOriginalData() {
     try {
         console.log('Fetching data from API...');
         const response = await fetchWithRetry({ url: DATA_API_URL });
-        const products = response.data;
         
+        // Handle OData response structure
+        const products = response.data.value || [];
+        
+        if (!Array.isArray(products)) {
+            throw new Error(`Invalid API response structure. Expected array in value property, got ${typeof products}. Response: ${JSON.stringify(response.data)}`);
+        }
+
         const dataMap = new Map();
         for (const product of products) {
-            const sku = product.sku || product.SKU;
-            const price = parseFloat(product.price || product.PRICE);
+            // Use Referencia as SKU, fallback to CodigoProducto
+            const sku = (product.Referencia || product.CodigoProducto || '').toString().trim();
+            const price = parseFloat(product.Venta1 || 0);
+            
             if (sku && !isNaN(price)) {
-                dataMap.set(sku.toString().trim(), {
+                dataMap.set(sku, {
                     price,
-                    inventory: parseInt(product.inventory || product.INVENTORY || 0, 10)
+                    inventory: 0  // Will be updated when we fetch inventory data
                 });
+            }
+        }
+        
+        // Now fetch inventory data
+        console.log('Fetching inventory data...');
+        const invResponse = await fetchWithRetry({ url: INVENTORY_API_URL });
+        const inventory = invResponse.data.value || [];
+
+        // Update inventory quantities
+        for (const item of inventory) {
+            const sku = (item.Referencia || item.CodigoProducto || '').toString().trim();
+            if (dataMap.has(sku)) {
+                const existingData = dataMap.get(sku);
+                existingData.inventory = parseInt(item.Existencia || item.Cantidad || 0, 10);
+                dataMap.set(sku, existingData);
             }
         }
         
@@ -250,6 +273,9 @@ async function getOriginalData() {
         return dataMap;
     } catch (error) {
         console.error('Error fetching data:', error.message);
+        if (error.response?.data) {
+            console.error('API Response:', JSON.stringify(error.response.data, null, 2));
+        }
         throw error;
     }
 }
