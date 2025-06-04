@@ -332,10 +332,13 @@ async function updateVariant(variantId, updates) {
 // --- Main Functions ---
 function cleanNumericSku(sku) {
     if (!sku) return '';
-    // Remove leading zeros and any whitespace
-    const cleaned = sku.toString().trim().replace(/^0+/, '');
-    // If the remaining string is purely numeric, return it
-    return /^\d+$/.test(cleaned) ? cleaned : '';
+    
+    // Modified to handle up to 5 digits (with or without leading zeros)
+    const match = sku.toString().trim().match(/^0*(\d{1,5})$/);
+    if (!match) return '';
+    
+    // Return the number without leading zeros
+    return match[1];
 }
 
 async function getOriginalData() {
@@ -442,6 +445,39 @@ async function main() {
             Logger.error('Failed to load discount prices, continuing without discounts:', error);
         }
 
+        // First, create a Set of valid numeric SKUs from discount CSV for faster lookup
+        const validDiscountSkus = new Set();
+        for (const [sku, price] of discountPrices) {
+            if (/^\d{1,5}$/.test(sku)) {  // Modified to accept 1-5 digit SKUs
+                validDiscountSkus.add(sku);
+                Logger.info(`Registered valid discount SKU ${sku}: ${price}`);
+            } else {
+                Logger.warn(`Skipping invalid discount SKU format: ${sku}`);
+            }
+        }
+
+        // Separate products into discount and regular lists more efficiently
+        const discountProducts = new Map();
+        const regularProducts = new Map();
+
+        for (const [sku, data] of originalData) {
+            const numericSku = cleanNumericSku(sku);
+            
+            if (numericSku && validDiscountSkus.has(numericSku)) {
+                const discountPrice = discountPrices.get(numericSku);
+                discountProducts.set(sku, {
+                    ...data,
+                    discountPrice
+                });
+                Logger.info(`Matched SKU ${sku} -> ${numericSku} for discount update (${discountPrice})`);
+            } else {
+                regularProducts.set(sku, data);
+            }
+        }
+
+        Logger.info(`Found ${discountProducts.size} products with discounts to update`);
+        Logger.info(`Regular products to process: ${regularProducts.size}`);
+
         Logger.info('Starting updates...');
         const stats = {
             total: originalData.size,
@@ -451,30 +487,6 @@ async function main() {
             failed: 0,
             skipped: 0
         };
-
-        // Separate products into discount and regular lists
-        const discountProducts = new Map();
-        const regularProducts = new Map();
-
-        for (const [sku, data] of originalData) {
-            // Only clean SKU for discount matching
-            const numericSku = cleanNumericSku(sku);
-            
-            if (numericSku && discountPrices.has(numericSku)) {
-                const discountPrice = discountPrices.get(numericSku);
-                // Use original SKU format for the update
-                discountProducts.set(sku, {
-                    ...data,
-                    discountPrice
-                });
-                Logger.info(`Marked SKU ${sku} (normalized: ${numericSku}) for discount update (discount price: ${discountPrice})`);
-            } else {
-                // Keep original SKU format for regular updates
-                regularProducts.set(sku, data);
-            }
-        }
-
-        Logger.info(`Found ${discountProducts.size} products with discounts to update`);
 
         // First process discount products (these need compare_at_price updates)
         Logger.info(`Processing ${discountProducts.size} products with discounts...`);
