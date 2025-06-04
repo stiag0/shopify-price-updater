@@ -330,17 +330,6 @@ async function updateVariant(variantId, updates) {
 }
 
 // --- Main Functions ---
-function cleanNumericSku(sku) {
-    if (!sku) return '';
-    
-    // Modified to handle up to 5 digits (with or without leading zeros)
-    const match = sku.toString().trim().match(/^0*(\d{1,5})$/);
-    if (!match) return '';
-    
-    // Return the number without leading zeros
-    return match[1];
-}
-
 async function getOriginalData() {
     try {
         Logger.info('Fetching data from API...');
@@ -349,41 +338,55 @@ async function getOriginalData() {
         const products = response.data.value || [];
         
         if (!Array.isArray(products)) {
-            throw new Error(`Invalid API response structure. Expected array in value property, got ${typeof products}`);
+            throw new Error(`Invalid API response structure. Expected array in value property`);
         }
 
         const dataMap = new Map();
+        let skippedNonNumeric = 0;
+
         for (const product of products) {
-            // Keep original SKU format for Shopify updates
             const sku = (product.Referencia || product.CodigoProducto || '').toString().trim();
-            const price = parseFloat(product.Venta1 || 0);
             
-            if (sku && !isNaN(price)) {
-                dataMap.set(sku, {
-                    price,
-                    inventory: 0,
-                    originalSku: sku  // Keep original SKU format
-                });
+            // Only process if SKU is purely numeric (1-5 digits)
+            if (/^\d{1,5}$/.test(sku)) {
+                const price = parseFloat(product.Venta1 || 0);
+                if (!isNaN(price)) {
+                    dataMap.set(sku, {
+                        price,
+                        inventory: 0
+                    });
+                }
+            } else {
+                skippedNonNumeric++;
             }
         }
         
-        // Inventory updates - use original SKU format
+        // Now fetch inventory data
         Logger.info('Fetching inventory data...');
         const invResponse = await fetchWithRetry({ url: INVENTORY_API_URL });
         const inventory = invResponse.data.value || [];
 
+        let skippedInvNonNumeric = 0;
+
+        // Update inventory quantities only for numeric SKUs
         for (const item of inventory) {
             const sku = (item.Referencia || item.CodigoProducto || '').toString().trim();
-            if (dataMap.has(sku)) {
+            
+            if (/^\d{1,5}$/.test(sku) && dataMap.has(sku)) {
                 const realInventory = parseFloat(item.CantidadInicial || 0) + 
                                     parseFloat(item.CantidadEntradas || 0) - 
                                     parseFloat(item.CantidadSalidas || 0);
                 
                 dataMap.get(sku).inventory = Math.max(0, Math.round(realInventory));
+            } else if (!/^\d{1,5}$/.test(sku)) {
+                skippedInvNonNumeric++;
             }
         }
         
-        Logger.info(`Loaded ${dataMap.size} products from API`);
+        Logger.info(`Loaded ${dataMap.size} numeric-only products from API`);
+        Logger.info(`Skipped ${skippedNonNumeric} products with non-numeric SKUs`);
+        Logger.info(`Skipped ${skippedInvNonNumeric} inventory records with non-numeric SKUs`);
+        
         return dataMap;
     } catch (error) {
         Logger.error('Error fetching data:', error);
@@ -448,35 +451,31 @@ async function main() {
         // First, create a Set of valid numeric SKUs from discount CSV for faster lookup
         const validDiscountSkus = new Set();
         for (const [sku, price] of discountPrices) {
-            if (/^\d{1,5}$/.test(sku)) {  // Modified to accept 1-5 digit SKUs
+            if (/^\d{1,5}$/.test(sku)) {
                 validDiscountSkus.add(sku);
                 Logger.info(`Registered valid discount SKU ${sku}: ${price}`);
-            } else {
-                Logger.warn(`Skipping invalid discount SKU format: ${sku}`);
             }
         }
 
-        // Separate products into discount and regular lists more efficiently
+        // Separate products (all products in originalData are already numeric-only)
         const discountProducts = new Map();
         const regularProducts = new Map();
 
         for (const [sku, data] of originalData) {
-            const numericSku = cleanNumericSku(sku);
-            
-            if (numericSku && validDiscountSkus.has(numericSku)) {
-                const discountPrice = discountPrices.get(numericSku);
+            if (validDiscountSkus.has(sku)) {
+                const discountPrice = discountPrices.get(sku);
                 discountProducts.set(sku, {
                     ...data,
                     discountPrice
                 });
-                Logger.info(`Matched SKU ${sku} -> ${numericSku} for discount update (${discountPrice})`);
+                Logger.info(`Matched SKU ${sku} for discount update (${discountPrice})`);
             } else {
                 regularProducts.set(sku, data);
             }
         }
 
         Logger.info(`Found ${discountProducts.size} products with discounts to update`);
-        Logger.info(`Regular products to process: ${regularProducts.size}`);
+        Logger.info(`Regular numeric products to process: ${regularProducts.size}`);
 
         Logger.info('Starting updates...');
         const stats = {
