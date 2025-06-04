@@ -915,18 +915,40 @@ async function main() {
 
                 if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
                     const currentPrice = parseFloat(variant.price);
-                    if (currentPrice !== data.discountPrice) {
-                        if (validatePriceChange(currentPrice, data.discountPrice)) {
-                            updates.price = data.discountPrice.toString();
-                            updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = data.price.toString();
+                    const currentCompareAtPrice = parseFloat(variant.compareAtPrice || variant.compare_at_price) || null;
+                    const newPrice = parseFloat(data.discountPrice);
+                    const newCompareAtPrice = parseFloat(data.price);
+
+                    // Check if either price or compare-at-price needs updating
+                    if (currentPrice !== newPrice || currentCompareAtPrice !== newCompareAtPrice) {
+                        if (validatePriceChange(currentPrice, newPrice)) {
+                            updates.price = newPrice.toString();
+                            updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = newCompareAtPrice.toString();
                             needsUpdate = true;
-                            changes.push(`Price: ${formatPriceChange(currentPrice, data.discountPrice)}`);
-                            changes.push(`Compare at Price: ${formatPriceChange(variant.compareAtPrice || variant.compare_at_price || 'None', data.price)}`);
+                            
+                            // Log both price changes
+                            const priceChangeMsg = Logger.logPriceChange(sku, productName, currentPrice, newPrice);
+                            const compareChangeMsg = Logger.logPriceChange(
+                                sku, 
+                                productName,
+                                currentCompareAtPrice || 'None',
+                                newCompareAtPrice,
+                                'compare'
+                            );
+                            
+                            changes.push(priceChangeMsg);
+                            changes.push(compareChangeMsg);
                             stats.priceUpdates++;
+                            
+                            Logger.debug(`Updating discount product ${sku}:
+                                Current Price: ${currentPrice} -> New Price: ${newPrice}
+                                Current Compare At: ${currentCompareAtPrice} -> New Compare At: ${newCompareAtPrice}`);
                         } else {
-                            Logger.warn(`Skipping suspicious price update for SKU ${sku}`);
+                            Logger.warn(`Skipping suspicious price update for SKU ${sku} (${productName})`);
                             stats.skippedPriceUpdates++;
                         }
+                    } else {
+                        Logger.debug(`No price update needed for SKU ${sku} (current: ${currentPrice}, discount: ${newPrice})`);
                     }
                 }
 
@@ -943,7 +965,8 @@ async function main() {
                             );
                         }
                         needsUpdate = true;
-                        changes.push(`Inventory: ${formatInventoryChange(currentInventory, data.inventory)}`);
+                        const inventoryChangeMsg = Logger.logInventoryChange(sku, productName, currentInventory, data.inventory);
+                        changes.push(inventoryChangeMsg);
                         stats.inventoryUpdates++;
                     }
                 }
