@@ -521,32 +521,40 @@ async function getAllShopifyVariants() {
 
     if (USE_REST_API === 'true') {
         // REST API Implementation using Link header-based pagination
-        let nextUrl = `/products/variants.json?limit=${REST_API_LIMIT}`;  // Updated endpoint path
+        let nextUrl = `/products.json?limit=${REST_API_LIMIT}&fields=id,variants`;  // Get products with their variants
         
         while (nextUrl && pageCount < MAX_PAGES) {
             try {
                 await shopifyLimiter.removeTokens(1);
                 const response = await axiosShopify.get(nextUrl);
-                const variants = response.data.variants;
+                const products = response.data.products;
 
-                if (!variants || variants.length === 0) {
+                if (!products || products.length === 0) {
                     break;
                 }
 
-                // Store only variants with numeric SKUs (1-5 digits)
-                variants.forEach(variant => {
-                    if (variant.sku && /^\d{1,5}$/.test(variant.sku)) {
-                        allVariants.set(variant.sku, {
-                            ...variant,
-                            compareAtPrice: variant.compare_at_price, // Normalize field name
-                            inventoryQuantity: variant.inventory_quantity,
-                            inventoryItem: {
-                                id: variant.inventory_item_id,
-                                tracked: true // REST API doesn't provide this info directly
+                // Process variants from each product
+                for (const product of products) {
+                    if (product.variants && Array.isArray(product.variants)) {
+                        product.variants.forEach(variant => {
+                            if (variant.sku && /^\d{1,5}$/.test(variant.sku)) {
+                                allVariants.set(variant.sku, {
+                                    ...variant,
+                                    compareAtPrice: variant.compare_at_price, // Normalize field name
+                                    inventoryQuantity: variant.inventory_quantity,
+                                    inventoryItem: {
+                                        id: variant.inventory_item_id,
+                                        tracked: true // REST API doesn't provide this info directly
+                                    },
+                                    product: {
+                                        id: product.id,
+                                        title: product.title
+                                    }
+                                });
                             }
                         });
                     }
-                });
+                }
 
                 // Get the next URL from the Link header
                 const linkHeader = response.headers.link;
@@ -572,7 +580,7 @@ async function getAllShopifyVariants() {
                 }
 
                 pageCount++;
-                Logger.info(`Fetched page ${pageCount} of variants using REST API...`);
+                Logger.info(`Fetched page ${pageCount} of products using REST API...`);
 
             } catch (error) {
                 Logger.error('Error fetching variants with REST API:', error);
