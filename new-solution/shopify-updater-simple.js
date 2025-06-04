@@ -201,8 +201,10 @@ async function getVariantBySkuRest(sku) {
 async function updateVariantRest(variantId, updates) {
     try {
         await shopifyLimiter.removeTokens(1);
-        // Extract numeric ID from variantId if it's a Shopify GID
-        const numericId = variantId.includes('/') ? variantId.split('/').pop() : variantId;
+        // Convert variantId to string and extract numeric ID if it's a Shopify GID
+        const variantIdStr = String(variantId);
+        const numericId = variantIdStr.includes('/') ? variantIdStr.split('/').pop() : variantIdStr;
+        
         const response = await axiosShopify.put(
             `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/variants/${numericId}.json`,
             {
