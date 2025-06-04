@@ -409,7 +409,19 @@ async function main() {
                     if (currentPrice !== targetPrice) {
                         updates.price = targetPrice.toString();
                         if (discountPrices.has(sku)) {
-                            updates.compareAtPrice = data.price.toString();
+                            // Use the correct field name based on API type
+                            if (USE_REST_API === 'true') {
+                                updates.compare_at_price = data.price.toString();
+                            } else {
+                                updates.compareAtPrice = data.price.toString();
+                            }
+                        } else {
+                            // Clear compare at price when not using discount
+                            if (USE_REST_API === 'true') {
+                                updates.compare_at_price = null;
+                            } else {
+                                updates.compareAtPrice = null;
+                            }
                         }
                         needsUpdate = true;
                     }
