@@ -521,7 +521,7 @@ async function getAllShopifyVariants() {
 
     if (USE_REST_API === 'true') {
         // REST API Implementation using Link header-based pagination
-        let nextUrl = `/variants.json?limit=${REST_API_LIMIT}`;  // Initial URL
+        let nextUrl = `/products/variants.json?limit=${REST_API_LIMIT}`;  // Updated endpoint path
         
         while (nextUrl && pageCount < MAX_PAGES) {
             try {
