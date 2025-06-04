@@ -402,6 +402,13 @@ async function getOriginalData() {
     }
 }
 
+function cleanNumericSku(sku) {
+    if (!sku) return '';
+    // Extract only numbers from the SKU
+    const numericSku = sku.toString().replace(/[^0-9]/g, '');
+    return numericSku;
+}
+
 async function loadDiscountPrices() {
     const discountPrices = new Map();
     
@@ -427,10 +434,6 @@ async function loadDiscountPrices() {
                 })
                 .on('end', () => {
                     Logger.info(`Loaded ${discountPrices.size} discount prices from CSV`);
-                    if (discountPrices.size === 0) {
-                        Logger.warn('No valid discount prices found in CSV. Available columns: ' + 
-                            Object.keys(row || {}).join(', '));
-                    }
                     resolve(discountPrices);
                 })
                 .on('error', (error) => {
@@ -475,14 +478,16 @@ async function main() {
         const regularProducts = new Map();
 
         for (const [sku, data] of originalData) {
-            // Check both the main SKU and alternative SKU for discounts
-            if (discountPrices.has(sku) || discountPrices.has(data.alternativeSku)) {
-                const discountPrice = discountPrices.get(sku) || discountPrices.get(data.alternativeSku);
+            // Clean the SKU to numeric only
+            const numericSku = cleanNumericSku(sku);
+            
+            if (numericSku && discountPrices.has(numericSku)) {
+                const discountPrice = discountPrices.get(numericSku);
                 discountProducts.set(sku, {
                     ...data,
                     discountPrice
                 });
-                Logger.info(`Marked SKU ${sku} for discount update (discount price: ${discountPrice})`);
+                Logger.info(`Marked SKU ${sku} (numeric: ${numericSku}) for discount update (discount price: ${discountPrice})`);
             } else {
                 regularProducts.set(sku, data);
             }
