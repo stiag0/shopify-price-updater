@@ -10,8 +10,11 @@ const {
     SHOPIFY_SHOP_NAME,
     SHOPIFY_ACCESS_TOKEN,
     INVENTORY_API_URL,
+    DATA_API_URL,
     DISCOUNT_CSV_PATH = 'discounts.csv',
-    USE_REST_API = 'false' // Default to GraphQL if not specified
+    USE_REST_API = 'false', // Default to GraphQL if not specified
+    LOCATION_ID, // Optional: For multi-location inventory
+    UPDATE_MODE = 'both' // 'price', 'inventory', or 'both'
 } = process.env;
 
 const SHOPIFY_API_VERSION = '2024-01';
@@ -21,7 +24,7 @@ const MAX_RETRIES = 3;
 const RATE_LIMIT = USE_REST_API === 'true' ? 1 : 2; // More conservative rate limit for REST API
 
 // --- Validation ---
-if (!SHOPIFY_SHOP_NAME || !SHOPIFY_ACCESS_TOKEN || !INVENTORY_API_URL) {
+if (!SHOPIFY_SHOP_NAME || !SHOPIFY_ACCESS_TOKEN || !DATA_API_URL || !INVENTORY_API_URL) {
     console.error("Error: Missing required environment variables");
     process.exit(1);
 }
@@ -66,14 +69,13 @@ async function getVariantBySkuRest(sku) {
     }
 }
 
-async function updateVariantRest(variantId, newPrice, compareAtPrice) {
+async function updateVariantRest(variantId, updates) {
     try {
         await shopifyLimiter.removeTokens(1);
         const response = await axiosShopify.put(`/variants/${variantId}.json`, {
             variant: {
                 id: variantId,
-                price: newPrice.toString(),
-                compare_at_price: compareAtPrice ? compareAtPrice.toString() : null
+                ...updates
             }
         });
         return response.data.variant;
@@ -94,6 +96,10 @@ async function getVariantBySkuGraphQL(sku) {
                         sku
                         price
                         compareAtPrice
+                        inventoryQuantity
+                        inventoryItem {
+                            id
+                        }
                     }
                 }
             }
@@ -118,14 +124,15 @@ async function getVariantBySkuGraphQL(sku) {
     }
 }
 
-async function updateVariantGraphQL(variantId, newPrice, compareAtPrice) {
+async function updateVariantGraphQL(variantId, updates) {
     const mutation = `
         mutation variantUpdate($input: ProductVariantInput!) {
-            variantUpdate(input: $input) {
+            productVariantUpdate(input: $input) {
                 productVariant {
                     id
                     price
                     compareAtPrice
+                    inventoryQuantity
                 }
                 userErrors {
                     field
@@ -142,8 +149,7 @@ async function updateVariantGraphQL(variantId, newPrice, compareAtPrice) {
             variables: {
                 input: {
                     id: variantId,
-                    price: newPrice.toString(),
-                    compareAtPrice: compareAtPrice ? compareAtPrice.toString() : null
+                    ...updates
                 }
             }
         });
@@ -152,7 +158,7 @@ async function updateVariantGraphQL(variantId, newPrice, compareAtPrice) {
             throw new Error(JSON.stringify(response.data.errors));
         }
 
-        const result = response.data.data.variantUpdate;
+        const result = response.data.data.productVariantUpdate;
         if (result.userErrors.length > 0) {
             throw new Error(JSON.stringify(result.userErrors));
         }
@@ -164,6 +170,50 @@ async function updateVariantGraphQL(variantId, newPrice, compareAtPrice) {
     }
 }
 
+async function updateInventoryLevelGraphQL(inventoryItemId, locationId, quantity) {
+    const mutation = `
+        mutation inventoryAdjustQuantity($input: InventoryAdjustQuantityInput!) {
+            inventoryAdjustQuantity(input: $input) {
+                inventoryLevel {
+                    available
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+    `;
+
+    try {
+        await shopifyLimiter.removeTokens(1);
+        const response = await axiosShopify.post('', {
+            query: mutation,
+            variables: {
+                input: {
+                    inventoryItemId,
+                    locationId,
+                    availableDelta: quantity
+                }
+            }
+        });
+
+        if (response.data.errors) {
+            throw new Error(JSON.stringify(response.data.errors));
+        }
+
+        const result = response.data.data.inventoryAdjustQuantity;
+        if (result.userErrors.length > 0) {
+            throw new Error(JSON.stringify(result.userErrors));
+        }
+
+        return result.inventoryLevel;
+    } catch (error) {
+        console.error('GraphQL Error updating inventory:', error.message);
+        throw error;
+    }
+}
+
 // --- API Wrapper Functions ---
 async function getVariantBySku(sku) {
     return USE_REST_API === 'true' ? 
@@ -171,32 +221,35 @@ async function getVariantBySku(sku) {
         getVariantBySkuGraphQL(sku);
 }
 
-async function updateVariant(variantId, newPrice, compareAtPrice) {
+async function updateVariant(variantId, updates) {
     return USE_REST_API === 'true' ? 
-        updateVariantRest(variantId, newPrice, compareAtPrice) : 
-        updateVariantGraphQL(variantId, newPrice, compareAtPrice);
+        updateVariantRest(variantId, updates) : 
+        updateVariantGraphQL(variantId, updates);
 }
 
 // --- Main Functions ---
-async function getOriginalPrices() {
+async function getOriginalData() {
     try {
-        console.log('Fetching original prices from API...');
-        const response = await fetchWithRetry({ url: INVENTORY_API_URL });
+        console.log('Fetching data from API...');
+        const response = await fetchWithRetry({ url: DATA_API_URL });
         const products = response.data;
         
-        const priceMap = new Map();
+        const dataMap = new Map();
         for (const product of products) {
             const sku = product.sku || product.SKU;
             const price = parseFloat(product.price || product.PRICE);
             if (sku && !isNaN(price)) {
-                priceMap.set(sku.toString().trim(), price);
+                dataMap.set(sku.toString().trim(), {
+                    price,
+                    inventory: parseInt(product.inventory || product.INVENTORY || 0, 10)
+                });
             }
         }
         
-        console.log(`Loaded ${priceMap.size} original prices`);
-        return priceMap;
+        console.log(`Loaded ${dataMap.size} products from API`);
+        return dataMap;
     } catch (error) {
-        console.error('Error fetching original prices:', error.message);
+        console.error('Error fetching data:', error.message);
         throw error;
     }
 }
@@ -225,31 +278,28 @@ async function loadDiscountPrices() {
 async function main() {
     try {
         console.log(`Using ${USE_REST_API === 'true' ? 'REST API' : 'GraphQL API'} for Shopify operations`);
+        console.log(`Update mode: ${UPDATE_MODE}`);
         
-        // Load original prices from API
-        const originalPrices = await getOriginalPrices();
+        // Load original data from API
+        const originalData = await getOriginalData();
         
-        // Load discount prices from CSV
-        const discountPrices = await loadDiscountPrices();
+        // Load discount prices from CSV if they exist
+        let discountPrices = new Map();
+        if (fs.existsSync(DISCOUNT_CSV_PATH)) {
+            discountPrices = await loadDiscountPrices();
+        }
 
-        console.log('Starting price updates...');
+        console.log('Starting updates...');
         const stats = {
-            total: discountPrices.size,
+            total: originalData.size,
             updated: 0,
             failed: 0,
             skipped: 0
         };
 
-        // Process each SKU in the discount CSV
-        for (const [sku, discountPrice] of discountPrices) {
+        // Process each SKU
+        for (const [sku, data] of originalData) {
             try {
-                const originalPrice = originalPrices.get(sku);
-                if (!originalPrice) {
-                    console.warn(`No original price found for SKU ${sku}, skipping...`);
-                    stats.skipped++;
-                    continue;
-                }
-
                 // Get the variant from Shopify
                 const variant = await getVariantBySku(sku);
                 if (!variant) {
@@ -258,18 +308,49 @@ async function main() {
                     continue;
                 }
 
-                // Update prices if they're different
-                const currentPrice = parseFloat(variant.price);
-                const currentCompareAtPrice = variant.compareAtPrice ? 
-                    parseFloat(variant.compareAtPrice) : 
-                    (USE_REST_API === 'true' ? parseFloat(variant.compare_at_price) : null);
+                const updates = {};
+                let needsUpdate = false;
 
-                if (currentPrice !== discountPrice || currentCompareAtPrice !== originalPrice) {
-                    await updateVariant(variant.id, discountPrice, originalPrice);
-                    console.log(`Updated ${sku}: Price ${currentPrice} → ${discountPrice}, Compare At ${currentCompareAtPrice} → ${originalPrice}`);
+                // Handle price updates if enabled
+                if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
+                    const targetPrice = discountPrices.has(sku) ? discountPrices.get(sku) : data.price;
+                    const currentPrice = parseFloat(variant.price);
+                    
+                    if (currentPrice !== targetPrice) {
+                        updates.price = targetPrice.toString();
+                        if (discountPrices.has(sku)) {
+                            updates.compareAtPrice = data.price.toString();
+                        }
+                        needsUpdate = true;
+                    }
+                }
+
+                // Handle inventory updates if enabled
+                if (UPDATE_MODE === 'inventory' || UPDATE_MODE === 'both') {
+                    const currentInventory = variant.inventoryQuantity || 0;
+                    if (currentInventory !== data.inventory) {
+                        if (USE_REST_API === 'true') {
+                            updates.inventory_quantity = data.inventory;
+                        } else if (variant.inventoryItem?.id && LOCATION_ID) {
+                            // For GraphQL, we'll update inventory separately
+                            await updateInventoryLevelGraphQL(
+                                variant.inventoryItem.id,
+                                LOCATION_ID,
+                                data.inventory - currentInventory
+                            );
+                        }
+                        needsUpdate = true;
+                    }
+                }
+
+                if (needsUpdate) {
+                    if (Object.keys(updates).length > 0) {
+                        await updateVariant(variant.id, updates);
+                    }
+                    console.log(`Updated ${sku}: ${JSON.stringify(updates)}`);
                     stats.updated++;
                 } else {
-                    console.log(`Prices already correct for ${sku}, skipping...`);
+                    console.log(`No updates needed for ${sku}`);
                     stats.skipped++;
                 }
             } catch (error) {
