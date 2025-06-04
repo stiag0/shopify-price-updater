@@ -330,12 +330,19 @@ async function updateVariant(variantId, updates) {
 }
 
 // --- Main Functions ---
+function cleanNumericSku(sku) {
+    if (!sku) return '';
+    // Remove leading zeros and any whitespace
+    const cleaned = sku.toString().trim().replace(/^0+/, '');
+    // If the remaining string is purely numeric, return it
+    return /^\d+$/.test(cleaned) ? cleaned : '';
+}
+
 async function getOriginalData() {
     try {
         Logger.info('Fetching data from API...');
         const response = await fetchWithRetry({ url: DATA_API_URL });
         
-        // Handle OData response structure
         const products = response.data.value || [];
         
         if (!Array.isArray(products)) {
@@ -344,53 +351,32 @@ async function getOriginalData() {
 
         const dataMap = new Map();
         for (const product of products) {
-            // Get both Referencia and CodigoProducto
-            const referencia = (product.Referencia || '').toString().trim();
-            const codigo = (product.CodigoProducto || '').toString().trim();
+            // Keep original SKU format for Shopify updates
+            const sku = (product.Referencia || product.CodigoProducto || '').toString().trim();
             const price = parseFloat(product.Venta1 || 0);
             
-            if (price && !isNaN(price)) {
-                // Store both SKU versions in the map
-                if (referencia) {
-                    dataMap.set(referencia, {
-                        price,
-                        inventory: 0,
-                        alternativeSku: codigo
-                    });
-                }
-                if (codigo) {
-                    dataMap.set(codigo, {
-                        price,
-                        inventory: 0,
-                        alternativeSku: referencia
-                    });
-                }
+            if (sku && !isNaN(price)) {
+                dataMap.set(sku, {
+                    price,
+                    inventory: 0,
+                    originalSku: sku  // Keep original SKU format
+                });
             }
         }
         
-        // Now fetch inventory data
+        // Inventory updates - use original SKU format
         Logger.info('Fetching inventory data...');
         const invResponse = await fetchWithRetry({ url: INVENTORY_API_URL });
         const inventory = invResponse.data.value || [];
 
-        // Update inventory quantities
         for (const item of inventory) {
-            const referencia = (item.Referencia || '').toString().trim();
-            const codigo = (item.CodigoProducto || '').toString().trim();
-            
-            // Calculate real inventory
-            const realInventory = parseFloat(item.CantidadInicial || 0) + 
-                                parseFloat(item.CantidadEntradas || 0) - 
-                                parseFloat(item.CantidadSalidas || 0);
-            
-            const inventoryValue = Math.max(0, Math.round(realInventory));
-
-            // Update inventory for both SKU versions
-            if (referencia && dataMap.has(referencia)) {
-                dataMap.get(referencia).inventory = inventoryValue;
-            }
-            if (codigo && dataMap.has(codigo)) {
-                dataMap.get(codigo).inventory = inventoryValue;
+            const sku = (item.Referencia || item.CodigoProducto || '').toString().trim();
+            if (dataMap.has(sku)) {
+                const realInventory = parseFloat(item.CantidadInicial || 0) + 
+                                    parseFloat(item.CantidadEntradas || 0) - 
+                                    parseFloat(item.CantidadSalidas || 0);
+                
+                dataMap.get(sku).inventory = Math.max(0, Math.round(realInventory));
             }
         }
         
@@ -400,20 +386,6 @@ async function getOriginalData() {
         Logger.error('Error fetching data:', error);
         throw error;
     }
-}
-
-function cleanNumericSku(sku) {
-    if (!sku) return '';
-    
-    // Remove leading zeros and any whitespace
-    const cleaned = sku.toString().trim().replace(/^0+/, '');
-    
-    // If the remaining string is purely numeric, return it
-    if (/^\d+$/.test(cleaned)) {
-        return cleaned;
-    }
-    
-    return ''; // Return empty string if not a pure numeric SKU
 }
 
 async function loadDiscountPrices() {
@@ -485,16 +457,19 @@ async function main() {
         const regularProducts = new Map();
 
         for (const [sku, data] of originalData) {
+            // Only clean SKU for discount matching
             const numericSku = cleanNumericSku(sku);
             
             if (numericSku && discountPrices.has(numericSku)) {
                 const discountPrice = discountPrices.get(numericSku);
+                // Use original SKU format for the update
                 discountProducts.set(sku, {
                     ...data,
                     discountPrice
                 });
                 Logger.info(`Marked SKU ${sku} (normalized: ${numericSku}) for discount update (discount price: ${discountPrice})`);
             } else {
+                // Keep original SKU format for regular updates
                 regularProducts.set(sku, data);
             }
         }
@@ -505,6 +480,7 @@ async function main() {
         Logger.info(`Processing ${discountProducts.size} products with discounts...`);
         for (const [sku, data] of discountProducts) {
             try {
+                // Use original SKU format for Shopify operations
                 const variant = await getVariantBySku(sku);
                 if (!variant) {
                     Logger.warn(`No variant found in Shopify for SKU ${sku}, skipping...`);
@@ -564,6 +540,7 @@ async function main() {
         Logger.info(`Processing ${regularProducts.size} regular products...`);
         for (const [sku, data] of regularProducts) {
             try {
+                // Use original SKU format for Shopify operations
                 const variant = await getVariantBySku(sku);
                 if (!variant) {
                     Logger.warn(`No variant found in Shopify for SKU ${sku}, skipping...`);
