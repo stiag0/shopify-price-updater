@@ -63,6 +63,7 @@ const Logger = {
             `Shop: ${SHOPIFY_SHOP_NAME}`,
             `API Mode: ${USE_REST_API === 'true' ? 'REST' : 'GraphQL'}`,
             `Update Mode: ${UPDATE_MODE}`,
+            `Rate Limit: ${RATE_LIMIT} requests per second`,
             `=`.repeat(80),
             ''
         ].join('\n');
@@ -71,11 +72,15 @@ const Logger = {
     },
 
     log(message, level = 'INFO') {
-        const logEntry = this.formatMessage(message, level) + '\n';
+        const timestamp = new Date().toISOString();
         
-        // Console output with emoji indicators and colors
+        // Format for console (with emoji)
         const consoleMessage = this.formatConsoleMessage(message, level);
         
+        // Format for log file (clean, with level and timestamp)
+        const logMessage = `[${timestamp}] [${level.padEnd(7)}] ${message}\n`;
+        
+        // Console output
         if (level === 'ERROR') {
             console.error(consoleMessage);
         } else if (level === 'WARN') {
@@ -84,7 +89,8 @@ const Logger = {
             console.log(consoleMessage);
         }
 
-        this.logQueue.push(logEntry);
+        // Queue for file
+        this.logQueue.push(logMessage);
         this.processQueue();
     },
 
@@ -136,41 +142,45 @@ const Logger = {
     debug(message) { this.log(message, 'DEBUG'); },
     success(message) { this.log(message, 'SUCCESS'); },
 
-    formatMessage(message, level = 'INFO') {
-        let formattedMessage = message;
-        
-        // Handle objects and arrays
-        if (typeof message === 'object' && message !== null) {
-            try {
-                formattedMessage = JSON.stringify(message, (key, value) => {
-                    if (typeof value === 'string') {
-                        // Truncate long strings and clean special characters
-                        return value.length > 500 ? value.substring(0, 500) + '...' : value;
-                    }
-                    return value;
-                }, 2);
-            } catch (e) {
-                formattedMessage = '[Unserializable Object]';
-            }
-        }
-
-        // Clean and format SKU references
-        if (typeof formattedMessage === 'string') {
-            // Replace problematic characters in SKUs while maintaining readability
-            formattedMessage = formattedMessage.replace(/SKU\s+([^:,\s]+)/g, 'SKU "$1"');
-            // Ensure proper spacing after colons
-            formattedMessage = formattedMessage.replace(/:\s*([^\s])/g, ': $1');
-        }
-
-        const timestamp = new Date().toISOString();
-        return `[${timestamp}] [${level.padEnd(7)}] ${formattedMessage}`;
-    },
-
-    // Add a section separator in logs
     section(title) {
         const separator = '-'.repeat(40);
-        const message = `\n${separator}\n${title}\n${separator}\n`;
-        this.info(message);
+        // Add empty line before section
+        this.logQueue.push('\n');
+        // Add section header
+        this.log(`${separator}`);
+        this.log(`${title}`);
+        this.log(`${separator}`);
+        // Add empty line after section
+        this.logQueue.push('\n');
+    },
+
+    // Helper for price formatting
+    formatPrice(price) {
+        if (isNaN(price) || price === null || price === undefined) {
+            return 'N/A';
+        }
+        return `$${parseFloat(price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    },
+
+    // Helper for logging price changes
+    logPriceChange(sku, productName, oldPrice, newPrice, type = 'regular') {
+        const formattedOld = this.formatPrice(oldPrice);
+        const formattedNew = this.formatPrice(newPrice);
+        const changeMessage = `${type === 'compare' ? 'Compare at Price' : 'Price'}: ${formattedOld} → ${formattedNew}`;
+        
+        if (type === 'regular') {
+            const changePercent = ((newPrice - oldPrice) / oldPrice * 100).toFixed(1);
+            if (Math.abs(changePercent) > 50) {
+                this.warn(`Large price change detected for ${sku} (${productName}): ${changeMessage} (${changePercent}% change)`);
+            }
+        }
+        
+        return changeMessage;
+    },
+
+    // Helper for logging inventory changes
+    logInventoryChange(sku, productName, oldQty, newQty) {
+        return `Inventory: ${oldQty} → ${newQty} units`;
     }
 };
 
@@ -975,13 +985,24 @@ async function main() {
                             updates.price = data.price.toString();
                             updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = null;
                             needsUpdate = true;
-                            changes.push(`Price: ${formatPriceChange(currentPrice, data.price)}`);
+                            
+                            // Log price changes with more detail
+                            const priceChangeMsg = Logger.logPriceChange(sku, productName, currentPrice, data.price);
+                            changes.push(priceChangeMsg);
+                            
                             if (variant.compareAtPrice || variant.compare_at_price) {
-                                changes.push(`Compare at Price: ${formatPriceChange(variant.compareAtPrice || variant.compare_at_price, 'None')}`);
+                                const compareChangeMsg = Logger.logPriceChange(
+                                    sku, 
+                                    productName,
+                                    variant.compareAtPrice || variant.compare_at_price,
+                                    null,
+                                    'compare'
+                                );
+                                changes.push(compareChangeMsg);
                             }
                             stats.priceUpdates++;
                         } else {
-                            Logger.warn(`Skipping suspicious price update for SKU ${sku}`);
+                            Logger.warn(`Skipping suspicious price update for SKU ${sku} (${productName})`);
                             stats.skippedPriceUpdates++;
                         }
                     }
@@ -1000,7 +1021,8 @@ async function main() {
                             );
                         }
                         needsUpdate = true;
-                        changes.push(`Inventory: ${formatInventoryChange(currentInventory, data.inventory)}`);
+                        const inventoryChangeMsg = Logger.logInventoryChange(sku, productName, currentInventory, data.inventory);
+                        changes.push(inventoryChangeMsg);
                         stats.inventoryUpdates++;
                     }
                 }
