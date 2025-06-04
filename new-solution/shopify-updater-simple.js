@@ -55,25 +55,46 @@ const Logger = {
         if (!fs.existsSync(this.logDir)) {
             fs.mkdirSync(this.logDir, { recursive: true });
         }
-        fs.writeFileSync(this.logPath, `[${new Date().toISOString()}] [INFO] Logger initialized\n`);
+        const timestamp = new Date().toISOString();
+        const header = [
+            `=`.repeat(80),
+            `Shopify Price Updater Log - Started at ${timestamp}`,
+            `Environment: ${process.env.NODE_ENV || 'development'}`,
+            `Shop: ${SHOPIFY_SHOP_NAME}`,
+            `API Mode: ${USE_REST_API === 'true' ? 'REST' : 'GraphQL'}`,
+            `Update Mode: ${UPDATE_MODE}`,
+            `=`.repeat(80),
+            ''
+        ].join('\n');
+        
+        fs.writeFileSync(this.logPath, header);
     },
 
     log(message, level = 'INFO') {
         const logEntry = this.formatMessage(message, level) + '\n';
         
-        // Console output with emoji indicators
-        const consoleMessage = level === 'ERROR' ? `❌ ${message}` :
-                             level === 'WARN' ? `⚠️ ${message}` :
-                             level === 'SUCCESS' ? `✅ ${message}` : message;
-
+        // Console output with emoji indicators and colors
+        const consoleMessage = this.formatConsoleMessage(message, level);
+        
         if (level === 'ERROR') {
             console.error(consoleMessage);
+        } else if (level === 'WARN') {
+            console.warn(consoleMessage);
         } else {
             console.log(consoleMessage);
         }
 
         this.logQueue.push(logEntry);
         this.processQueue();
+    },
+
+    formatConsoleMessage(message, level) {
+        const emoji = level === 'ERROR' ? '❌' :
+                     level === 'WARN' ? '⚠️' :
+                     level === 'SUCCESS' ? '✅' :
+                     level === 'DEBUG' ? '🔍' : 'ℹ️';
+        
+        return `${emoji} ${message}`;
     },
 
     async processQueue() {
@@ -98,18 +119,22 @@ const Logger = {
     error(message, error = null) {
         let logMessage = message;
         if (error) {
-            logMessage += `: ${error.message || JSON.stringify(error)}`;
-            if (error.stack) {
-                logMessage += `\nStack: ${error.stack}`;
+            logMessage += `\nError Details:`;
+            if (error.message) {
+                logMessage += `\n  Message: ${error.message}`;
             }
-            if (error.response) {
-                logMessage += `\nResponse: Status=${error.response.status}, Data=${JSON.stringify(error.response.data)}`;
+            if (error.response?.data) {
+                logMessage += `\n  Response Data: ${JSON.stringify(error.response.data, null, 2)}`;
+            }
+            if (error.stack) {
+                logMessage += `\n  Stack Trace:\n    ${error.stack.split('\n').join('\n    ')}`;
             }
         }
         this.log(logMessage, 'ERROR');
     },
     warn(message) { this.log(message, 'WARN'); },
     debug(message) { this.log(message, 'DEBUG'); },
+    success(message) { this.log(message, 'SUCCESS'); },
 
     formatMessage(message, level = 'INFO') {
         let formattedMessage = message;
@@ -138,7 +163,14 @@ const Logger = {
         }
 
         const timestamp = new Date().toISOString();
-        return `[${timestamp}] [${level}] ${formattedMessage}`;
+        return `[${timestamp}] [${level.padEnd(7)}] ${formattedMessage}`;
+    },
+
+    // Add a section separator in logs
+    section(title) {
+        const separator = '-'.repeat(40);
+        const message = `\n${separator}\n${title}\n${separator}\n`;
+        this.info(message);
     }
 };
 
@@ -740,21 +772,25 @@ const validatePriceChange = (currentPrice, newPrice, threshold = 0.5) => {
 async function main() {
     try {
         Timer.startTimer();
-        Logger.info('Using ' + (USE_REST_API === 'true' ? 'REST API' : 'GraphQL API') + ' for Shopify operations');
-        Logger.info(`Update mode: ${UPDATE_MODE}`);
+        Logger.section('Initialization');
+        Logger.info('Starting Shopify Price Updater');
+        Logger.info(`API Mode: ${USE_REST_API === 'true' ? 'REST' : 'GraphQL'}`);
+        Logger.info(`Update Mode: ${UPDATE_MODE}`);
+        Logger.info(`Rate Limit: ${RATE_LIMIT} requests per second`);
         
         // First, fetch all compatible Shopify variants
+        Logger.section('Fetching Shopify Variants');
         const shopifyVariants = await getAllShopifyVariants();
         
         // Load original data from API
+        Logger.section('Loading Original Data');
         const originalData = await getOriginalData();
         
         // Modify the matching logic
+        Logger.section('SKU Matching');
         const filteredData = new Map();
         let matchedSkus = new Set();
         let skippedSkus = new Set();
-
-        Logger.info('Matching products with Shopify variants...');
 
         for (const [sku, data] of originalData) {
             const [numericSku, paddedSku] = normalizeSkuForMatching(sku);
@@ -768,6 +804,7 @@ async function main() {
                     filteredData.set(sku, data);
                     matchedSkus.add(sku);
                     matched = true;
+                    Logger.debug(`Matched SKU ${sku} to Shopify variant ${variant.product?.title || 'Unknown Product'}`);
                     break;
                 }
             }
@@ -777,19 +814,21 @@ async function main() {
             }
         }
 
-        Logger.info(`Matching results:`);
-        Logger.info(`- Total Shopify variants: ${shopifyVariants.size}`);
-        Logger.info(`- Total local products: ${originalData.size}`);
-        Logger.info(`- Successfully matched: ${matchedSkus.size}`);
-        Logger.info(`- Unmatched SKUs: ${skippedSkus.size}`);
+        Logger.section('Matching Results');
+        Logger.info(`Total Shopify variants: ${shopifyVariants.size}`);
+        Logger.info(`Total local products: ${originalData.size}`);
+        Logger.info(`Successfully matched: ${matchedSkus.size}`);
+        Logger.info(`Unmatched SKUs: ${skippedSkus.size}`);
+        Logger.info(`Match rate: ${(matchedSkus.size / originalData.size * 100).toFixed(2)}%`);
 
         // Sample of unmatched SKUs for debugging
         const sampleUnmatched = Array.from(skippedSkus).slice(0, 5);
         if (sampleUnmatched.length > 0) {
-            Logger.info(`Sample of unmatched SKUs: ${sampleUnmatched.join(', ')}`);
+            Logger.debug(`Sample of unmatched SKUs: ${sampleUnmatched.join(', ')}`);
         }
         
         // Load and filter discount prices
+        Logger.section('Loading Discount Prices');
         let discountPrices = new Map();
         try {
             const allDiscounts = await loadDiscountPrices();
@@ -797,6 +836,9 @@ async function main() {
             for (const [sku, price] of allDiscounts) {
                 if (shopifyVariants.has(sku)) {
                     discountPrices.set(sku, price);
+                    Logger.debug(`Valid discount price for SKU ${sku}: ${price}`);
+                } else {
+                    Logger.debug(`Skipping discount price for non-existent SKU ${sku}`);
                 }
             }
             Logger.info(`Found ${discountPrices.size} valid discount prices for existing Shopify variants`);
@@ -804,7 +846,8 @@ async function main() {
             Logger.error('Failed to load discount prices, continuing without discounts:', error);
         }
 
-        // Separate products into discount and regular (only for existing Shopify variants)
+        // Separate products into discount and regular
+        Logger.section('Processing Products');
         const discountProducts = new Map();
         const regularProducts = new Map();
 
@@ -833,7 +876,8 @@ async function main() {
         };
 
         // Process discount products
-        Logger.info(`Processing ${discountProducts.size} products with discounts...`);
+        Logger.section('Processing Discount Products');
+        Logger.info(`Found ${discountProducts.size} products with discounts`);
         for (const [sku, data] of discountProducts) {
             try {
                 const variant = shopifyVariants.get(sku);
@@ -880,7 +924,7 @@ async function main() {
 
                 if (needsUpdate && Object.keys(updates).length > 0) {
                     await updateVariant(variant.id, updates);
-                    Logger.info(`✅ Updated discount product "${productName}" (${variantName}):\n   ${changes.join('\n   ')}`);
+                    Logger.success(`Updated discount product "${productName}" (${variantName}):\n   ${changes.join('\n   ')}`);
                     stats.updated++;
                     stats.discountUpdated++;
                 }
@@ -891,7 +935,8 @@ async function main() {
         }
 
         // Process regular products
-        Logger.info(`Processing ${regularProducts.size} regular products...`);
+        Logger.section('Processing Regular Products');
+        Logger.info(`Processing ${regularProducts.size} regular products`);
         for (const [sku, data] of regularProducts) {
             try {
                 const variant = shopifyVariants.get(sku);
@@ -940,7 +985,7 @@ async function main() {
 
                 if (needsUpdate && Object.keys(updates).length > 0) {
                     await updateVariant(variant.id, updates);
-                    Logger.info(`✅ Updated regular product "${productName}" (${variantName}):\n   ${changes.join('\n   ')}`);
+                    Logger.success(`Updated regular product "${productName}" (${variantName}):\n   ${changes.join('\n   ')}`);
                     stats.updated++;
                     stats.regularUpdated++;
                 }
@@ -950,16 +995,16 @@ async function main() {
             }
         }
 
-        // At the end of processing, add:
+        // Final statistics
+        Logger.section('Final Statistics');
         stats.matchRate = (matchedSkus.size / originalData.size * 100).toFixed(2);
-        Logger.info('\nDetailed Statistics:');
         Logger.info(`Match Rate: ${stats.matchRate}%`);
         Logger.info(`Price Updates: ${stats.priceUpdates}`);
         Logger.info(`Inventory Updates: ${stats.inventoryUpdates}`);
         Logger.info(`Skipped Price Updates: ${stats.skippedPriceUpdates}`);
         Logger.info(`Skipped Inventory Updates: ${stats.skippedInventoryUpdates}`);
 
-        Logger.info('\nUpdate completed:');
+        Logger.section('Summary');
         const duration = Timer.endTimer();
         Logger.info(`Total execution time: ${duration}`);
         Logger.info(`Total products matched with Shopify: ${stats.total}`);
@@ -970,7 +1015,7 @@ async function main() {
 
     } catch (error) {
         const duration = Timer.endTimer();
-        Logger.error(`Fatal error after ${duration}: ${error.message}`);
+        Logger.error(`Fatal error after ${duration}:`, error);
         process.exit(1);
     }
 }
@@ -991,6 +1036,6 @@ process.on('SIGTERM', () => {
 // Run the updater
 main().catch(error => {
     const duration = Timer.endTimer();
-    Logger.error(`Fatal error after ${duration}: ${error.message}`);
+    Logger.error(`Fatal error after ${duration}:`, error);
     process.exit(1);
 }); 
