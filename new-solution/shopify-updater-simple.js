@@ -791,6 +791,7 @@ async function main() {
         const filteredData = new Map();
         let matchedSkus = new Set();
         let skippedSkus = new Set();
+        let matchedVariants = new Map(); // Store matched variants for later use
 
         for (const [sku, data] of originalData) {
             const [numericSku, paddedSku] = normalizeSkuForMatching(sku);
@@ -798,19 +799,28 @@ async function main() {
             const possibleSkus = new Set([sku, numericSku, paddedSku]);
             
             let matched = false;
+            let matchedVariant = null;
+            
             for (const possibleSku of possibleSkus) {
                 if (shopifyVariants.has(possibleSku)) {
                     const variant = shopifyVariants.get(possibleSku);
-                    filteredData.set(sku, data);
-                    matchedSkus.add(sku);
-                    matched = true;
-                    Logger.debug(`Matched SKU ${sku} to Shopify variant ${variant.product?.title || 'Unknown Product'}`);
-                    break;
+                    if (variant && variant.product) {  // Ensure we have both variant and product data
+                        matchedVariant = variant;
+                        filteredData.set(sku, data);
+                        matchedSkus.add(sku);
+                        matchedVariants.set(sku, variant); // Store the matched variant
+                        matched = true;
+                        Logger.debug(`Matched SKU ${sku} to Shopify variant "${variant.product.title}" (${variant.displayName || possibleSku})`);
+                        break;
+                    } else {
+                        Logger.warn(`Found variant for SKU ${sku} but missing product data`);
+                    }
                 }
             }
             
             if (!matched) {
                 skippedSkus.add(sku);
+                Logger.debug(`No match found for SKU ${sku}`);
             }
         }
 
@@ -880,8 +890,14 @@ async function main() {
         Logger.info(`Found ${discountProducts.size} products with discounts`);
         for (const [sku, data] of discountProducts) {
             try {
-                const variant = shopifyVariants.get(sku);
-                const productName = variant.product?.title || 'Unknown Product';
+                const variant = matchedVariants.get(sku); // Use stored variant instead of looking up again
+                if (!variant || !variant.product) {
+                    Logger.warn(`Skipping discount SKU ${sku}: Missing variant or product data`);
+                    stats.skippedInventoryUpdates++;
+                    continue;
+                }
+
+                const productName = variant.product.title || 'Unknown Product';
                 const variantName = variant.displayName || sku;
                 const updates = {};
                 let needsUpdate = false;
@@ -939,8 +955,14 @@ async function main() {
         Logger.info(`Processing ${regularProducts.size} regular products`);
         for (const [sku, data] of regularProducts) {
             try {
-                const variant = shopifyVariants.get(sku);
-                const productName = variant.product?.title || 'Unknown Product';
+                const variant = matchedVariants.get(sku); // Use stored variant instead of looking up again
+                if (!variant || !variant.product) {
+                    Logger.warn(`Skipping regular SKU ${sku}: Missing variant or product data`);
+                    stats.skippedInventoryUpdates++;
+                    continue;
+                }
+
+                const productName = variant.product.title || 'Unknown Product';
                 const variantName = variant.displayName || sku;
                 const updates = {};
                 let needsUpdate = false;
