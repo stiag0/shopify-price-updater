@@ -57,17 +57,19 @@ const Logger = {
     },
 
     log(message, level = 'INFO') {
-        const timestamp = new Date().toISOString();
-        const logEntry = `[${timestamp}] [${level}] ${message}\n`;
+        const logEntry = this.formatMessage(message, level) + '\n';
         
-        // Always show in console
+        // Console output with emoji indicators
+        const consoleMessage = level === 'ERROR' ? `❌ ${message}` :
+                             level === 'WARN' ? `⚠️ ${message}` :
+                             level === 'SUCCESS' ? `✅ ${message}` : message;
+
         if (level === 'ERROR') {
-            console.error(message);
+            console.error(consoleMessage);
         } else {
-            console.log(message);
+            console.log(consoleMessage);
         }
 
-        // Queue for file writing
         this.logQueue.push(logEntry);
         this.processQueue();
     },
@@ -91,8 +93,50 @@ const Logger = {
     },
 
     info(message) { this.log(message, 'INFO'); },
-    error(message) { this.log(message, 'ERROR'); },
-    warn(message) { this.log(message, 'WARN'); }
+    error(message, error = null) {
+        let logMessage = message;
+        if (error) {
+            logMessage += `: ${error.message || JSON.stringify(error)}`;
+            if (error.stack) {
+                logMessage += `\nStack: ${error.stack}`;
+            }
+            if (error.response) {
+                logMessage += `\nResponse: Status=${error.response.status}, Data=${JSON.stringify(error.response.data)}`;
+            }
+        }
+        this.log(logMessage, 'ERROR');
+    },
+    warn(message) { this.log(message, 'WARN'); },
+
+    formatMessage(message, level = 'INFO') {
+        let formattedMessage = message;
+        
+        // Handle objects and arrays
+        if (typeof message === 'object' && message !== null) {
+            try {
+                formattedMessage = JSON.stringify(message, (key, value) => {
+                    if (typeof value === 'string') {
+                        // Truncate long strings and clean special characters
+                        return value.length > 500 ? value.substring(0, 500) + '...' : value;
+                    }
+                    return value;
+                }, 2);
+            } catch (e) {
+                formattedMessage = '[Unserializable Object]';
+            }
+        }
+
+        // Clean and format SKU references
+        if (typeof formattedMessage === 'string') {
+            // Replace problematic characters in SKUs while maintaining readability
+            formattedMessage = formattedMessage.replace(/SKU\s+([^:,\s]+)/g, 'SKU "$1"');
+            // Ensure proper spacing after colons
+            formattedMessage = formattedMessage.replace(/:\s*([^\s])/g, ': $1');
+        }
+
+        const timestamp = new Date().toISOString();
+        return `[${timestamp}] [${level}] ${formattedMessage}`;
+    }
 };
 
 // Initialize logger
