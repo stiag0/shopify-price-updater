@@ -16,10 +16,13 @@ const {
     LOCATION_ID, // Optional: For multi-location inventory
     UPDATE_MODE = 'both', // 'price', 'inventory', or 'both'
     LOG_FILE_PATH = path.join('logs', `shopify-sync_${new Date().toISOString().replace(/T/, '_').replace(/:/g, '-').split('.')[0]}.log`),
-    LIMIT = 250 // Maximum allowed by Shopify REST API for variants endpoint
+    LIMIT = 250, // Maximum allowed by Shopify REST API for variants endpoint
+    SHOPIFY_API_VERSION = '2024-10',
+    SYNC_MODE = process.env.SYNC_MODE || 'shopify_first',
+    SYNC_TYPE = process.env.SYNC_TYPE || 'both',
+    API_TIMEOUT = parseInt(process.env.API_TIMEOUT || '60000', 10)
 } = process.env;
 
-const SHOPIFY_API_VERSION = '2024-01';
 const SHOPIFY_GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 const SHOPIFY_REST_BASE_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`;
 const MAX_RETRIES = 3;
@@ -181,7 +184,15 @@ const Logger = {
     // Helper for logging inventory changes
     logInventoryChange(sku, productName, oldQty, newQty) {
         return `Inventory: ${oldQty} → ${newQty} units`;
-    }
+    },
+
+    formatDateForFilename(date) {
+        // ... better date formatting for logs
+    },
+
+    async checkLogSize() {
+        // ... better log rotation
+    },
 };
 
 // Initialize logger
@@ -432,9 +443,10 @@ async function updateInventoryLevel(inventoryItemId, locationId, quantity) {
  * @returns {String} - El SKU limpio.
  */
 function cleanSku(sku) {
-    if (!sku) return '0';
+    if (!sku) return null;
+    // Remove any non-numeric characters and leading zeros
     const cleaned = sku.toString().trim().replace(/[^0-9]/g, '').replace(/^0+/, '');
-    return cleaned || '0';
+    return cleaned || null;
 }
 
 // Replace the normalizeSkuForMatching function with this new one
@@ -442,7 +454,51 @@ const normalizeSkuForMatching = (sku) => {
     const cleanedSku = cleanSku(sku);
     // Only pad if it's a valid numeric SKU
     const paddedSku = /^\d{1,5}$/.test(cleanedSku) ? cleanedSku.padStart(5, '0') : cleanedSku;
-    return [cleanedSku, paddedSku];
+    return {
+        raw: sku.toString().trim(),
+        cleaned: cleanedSku,
+        padded: paddedSku,
+        isValid: /^\d{1,5}$/.test(cleanedSku)
+    };
+};
+
+// Add this new function to track processed SKUs
+const ProcessedSkus = {
+    _processed: new Set(),
+    _discountProcessed: new Set(),
+
+    hasBeenProcessed(sku) {
+        const normalized = normalizeSkuForMatching(sku);
+        return this._processed.has(normalized.cleaned) || 
+               this._processed.has(normalized.padded) ||
+               this._processed.has(normalized.raw);
+    },
+
+    hasBeenProcessedForDiscount(sku) {
+        const normalized = normalizeSkuForMatching(sku);
+        return this._discountProcessed.has(normalized.cleaned) || 
+               this._discountProcessed.has(normalized.padded) ||
+               this._discountProcessed.has(normalized.raw);
+    },
+
+    markAsProcessed(sku) {
+        const normalized = normalizeSkuForMatching(sku);
+        this._processed.add(normalized.cleaned);
+        this._processed.add(normalized.padded);
+        this._processed.add(normalized.raw);
+    },
+
+    markAsDiscountProcessed(sku) {
+        const normalized = normalizeSkuForMatching(sku);
+        this._discountProcessed.add(normalized.cleaned);
+        this._discountProcessed.add(normalized.padded);
+        this._discountProcessed.add(normalized.raw);
+    },
+
+    clear() {
+        this._processed.clear();
+        this._discountProcessed.clear();
+    }
 };
 
 async function getOriginalData() {
@@ -466,29 +522,27 @@ async function getOriginalData() {
 
         for (const product of products) {
             const rawSku = (product.Referencia || product.CodigoProducto || '').toString().trim();
-            const [cleanedSku, paddedSku] = normalizeSkuForMatching(rawSku);
+            const normalized = normalizeSkuForMatching(rawSku);
             
             // Log SKU processing
-            Logger.debug(`Processing SKU - Raw: ${rawSku}, Cleaned: ${cleanedSku}, Padded: ${paddedSku}`);
+            Logger.debug(`Processing SKU - Raw: ${normalized.raw}, Cleaned: ${normalized.cleaned}, Padded: ${normalized.padded}, Valid: ${normalized.isValid}`);
             
-            // Only process if SKU is purely numeric (1-5 digits)
-            if (/^\d{1,5}$/.test(cleanedSku)) {
+            // Only process if SKU is valid
+            if (normalized.isValid) {
                 const price = parseFloat(product.Venta1 || 0);
                 if (!isNaN(price) && price > 0) {
-                    // Store both cleaned and padded versions
                     const productData = {
                         price,
                         inventory: 0,
                         originalSku: rawSku
                     };
                     
-                    // Store all possible SKU formats for matching
-                    dataMap.set(rawSku, productData);
-                    dataMap.set(cleanedSku, productData);
-                    dataMap.set(paddedSku, productData);
+                    // Only store the cleaned and padded versions
+                    dataMap.set(normalized.cleaned, productData);
+                    dataMap.set(normalized.padded, productData);
                     
                     processedSkus.add(rawSku);
-                    Logger.debug(`Stored price for SKU ${rawSku} (${cleanedSku}, ${paddedSku}): ${price}`);
+                    Logger.debug(`Stored price for SKU ${rawSku} (${normalized.cleaned}, ${normalized.padded}): ${price}`);
                 } else {
                     skippedZeroPrices++;
                     Logger.debug(`Skipped zero/invalid price for SKU ${rawSku}: ${product.Venta1}`);
@@ -498,7 +552,7 @@ async function getOriginalData() {
                 Logger.debug(`Skipped non-numeric SKU: ${rawSku}`);
             }
         }
-        
+
         // Now fetch inventory data
         Logger.info('Fetching inventory data...');
         const invResponse = await fetchWithRetry({ url: INVENTORY_API_URL });
@@ -510,29 +564,22 @@ async function getOriginalData() {
         // Update inventory quantities
         for (const item of inventory) {
             const rawSku = (item.Referencia || item.CodigoProducto || '').toString().trim();
-            const [cleanedSku, paddedSku] = normalizeSkuForMatching(rawSku);
+            const normalized = normalizeSkuForMatching(rawSku);
             
-            if (/^\d{1,5}$/.test(cleanedSku)) {
+            if (normalized.isValid) {
                 const realInventory = parseFloat(item.CantidadInicial || 0) + 
                                     parseFloat(item.CantidadEntradas || 0) - 
                                     parseFloat(item.CantidadSalidas || 0);
                 
-                // Try all possible SKU formats
-                const skuFormats = [rawSku, cleanedSku, paddedSku];
-                let matched = false;
-                
-                for (const sku of skuFormats) {
-                    if (dataMap.has(sku)) {
-                        dataMap.get(sku).inventory = Math.max(0, Math.round(realInventory));
-                        processedInvSkus.add(rawSku);
-                        matched = true;
-                        Logger.debug(`Updated inventory for SKU ${rawSku} (${cleanedSku}, ${paddedSku}): ${realInventory}`);
-                        break;
-                    }
-                }
-                
-                if (!matched) {
-                    Logger.debug(`No matching product found for inventory SKU ${rawSku}`);
+                // Try both cleaned and padded versions
+                if (dataMap.has(normalized.cleaned)) {
+                    dataMap.get(normalized.cleaned).inventory = Math.max(0, Math.round(realInventory));
+                    processedInvSkus.add(rawSku);
+                    Logger.debug(`Updated inventory for SKU ${rawSku} (${normalized.cleaned}): ${realInventory}`);
+                } else if (dataMap.has(normalized.padded)) {
+                    dataMap.get(normalized.padded).inventory = Math.max(0, Math.round(realInventory));
+                    processedInvSkus.add(rawSku);
+                    Logger.debug(`Updated inventory for SKU ${rawSku} (${normalized.padded}): ${realInventory}`);
                 }
             } else {
                 skippedInvNonNumeric++;
@@ -572,6 +619,7 @@ async function loadDiscountPrices() {
         return new Promise((resolve, reject) => {
             let rowCount = 0;
             let errorCount = 0;
+            let validDiscounts = 0;
 
             response.data
                 .pipe(csv())
@@ -592,14 +640,13 @@ async function loadDiscountPrices() {
                         return;
                     }
                     
-                    const [cleanedSku, paddedSku] = normalizeSkuForMatching(rawSku);
-                    
-                    // Store all possible SKU formats for matching
-                    if (/^\d{1,5}$/.test(cleanedSku)) {
-                        discountPrices.set(rawSku, price);
-                        discountPrices.set(cleanedSku, price);
-                        discountPrices.set(paddedSku, price);
-                        Logger.debug(`Found discount for SKU ${rawSku} (${cleanedSku}, ${paddedSku}): ${price}`);
+                    const normalized = normalizeSkuForMatching(rawSku);
+                    if (normalized.isValid) {
+                        // Only store cleaned and padded versions
+                        discountPrices.set(normalized.cleaned, price);
+                        discountPrices.set(normalized.padded, price);
+                        validDiscounts++;
+                        Logger.debug(`Found discount for SKU ${rawSku} (${normalized.cleaned}, ${normalized.padded}): ${price}`);
                     } else {
                         Logger.warn(`Row ${rowCount}: Non-numeric SKU ${rawSku}`);
                         errorCount++;
@@ -607,7 +654,7 @@ async function loadDiscountPrices() {
                 })
                 .on('end', () => {
                     Logger.info(`Processed ${rowCount} rows from CSV`);
-                    Logger.info(`Found ${discountPrices.size} valid discount prices`);
+                    Logger.info(`Found ${validDiscounts} valid discount prices`);
                     if (errorCount > 0) {
                         Logger.warn(`Encountered ${errorCount} errors while processing discount prices`);
                     }
@@ -809,6 +856,10 @@ const validatePriceChange = (currentPrice, newPrice, threshold = 0.5) => {
     return true;
 };
 
+async function updateVariantInShopify(variant, newPrice, newInventory, locationId) {
+    // ... more robust variant updating
+}
+
 async function main() {
     try {
         Timer.startTimer();
@@ -818,6 +869,9 @@ async function main() {
         Logger.info(`Update Mode: ${UPDATE_MODE}`);
         Logger.info(`Rate Limit: ${RATE_LIMIT} requests per second`);
         
+        // Clear any previous processing state
+        ProcessedSkus.clear();
+        
         // First, fetch all compatible Shopify variants
         Logger.section('Fetching Shopify Variants');
         const shopifyVariants = await getAllShopifyVariants();
@@ -826,34 +880,51 @@ async function main() {
         Logger.section('Loading Original Data');
         const originalData = await getOriginalData();
         
+        // Load and filter discount prices
+        Logger.section('Loading Discount Prices');
+        let discountPrices = new Map();
+        try {
+            discountPrices = await loadDiscountPrices();
+            Logger.info(`Successfully loaded ${discountPrices.size / 2} unique discount SKUs`); // Divide by 2 because we store both cleaned and padded
+        } catch (error) {
+            Logger.error('Failed to load discount prices, continuing without discounts:', error);
+        }
+
         // Modify the matching logic
         Logger.section('SKU Matching');
         const filteredData = new Map();
         let matchedSkus = new Set();
         let skippedSkus = new Set();
-        let matchedVariants = new Map(); // Store matched variants for later use
+        let matchedVariants = new Map();
 
         for (const [sku, data] of originalData) {
-            const [numericSku, paddedSku] = normalizeSkuForMatching(sku);
-            // Try all possible SKU formats
-            const possibleSkus = new Set([sku, numericSku, paddedSku]);
+            const normalized = normalizeSkuForMatching(sku);
+            
+            // Skip if already processed
+            if (ProcessedSkus.hasBeenProcessed(sku)) {
+                Logger.debug(`Skipping already processed SKU ${sku}`);
+                continue;
+            }
             
             let matched = false;
             let matchedVariant = null;
             
-            for (const possibleSku of possibleSkus) {
-                if (shopifyVariants.has(possibleSku)) {
-                    const variant = shopifyVariants.get(possibleSku);
-                    if (variant && variant.product) {  // Ensure we have both variant and product data
-                        matchedVariant = variant;
-                        filteredData.set(sku, data);
-                        matchedSkus.add(sku);
-                        matchedVariants.set(sku, variant); // Store the matched variant
-                        matched = true;
-                        Logger.debug(`Matched SKU ${sku} to Shopify variant "${variant.product.title}" (${variant.displayName || possibleSku})`);
-                        break;
-                    } else {
-                        Logger.warn(`Found variant for SKU ${sku} but missing product data`);
+            // Try to find a matching variant
+            if (normalized.isValid) {
+                const possibleSkus = [normalized.cleaned, normalized.padded];
+                for (const possibleSku of possibleSkus) {
+                    if (shopifyVariants.has(possibleSku)) {
+                        const variant = shopifyVariants.get(possibleSku);
+                        if (variant && variant.product) {
+                            matchedVariant = variant;
+                            filteredData.set(normalized.cleaned, data);
+                            matchedSkus.add(normalized.cleaned);
+                            matchedVariants.set(normalized.cleaned, variant);
+                            matched = true;
+                            Logger.debug(`Matched SKU ${sku} to Shopify variant "${variant.product.title}" (${variant.displayName || possibleSku})`);
+                            ProcessedSkus.markAsProcessed(sku);
+                            break;
+                        }
                     }
                 }
             }
@@ -876,25 +947,6 @@ async function main() {
         if (sampleUnmatched.length > 0) {
             Logger.debug(`Sample of unmatched SKUs: ${sampleUnmatched.join(', ')}`);
         }
-        
-        // Load and filter discount prices
-        Logger.section('Loading Discount Prices');
-        let discountPrices = new Map();
-        try {
-            const allDiscounts = await loadDiscountPrices();
-            // Only keep discounts for SKUs that exist in Shopify
-            for (const [sku, price] of allDiscounts) {
-                if (shopifyVariants.has(sku)) {
-                    discountPrices.set(sku, price);
-                    Logger.debug(`Valid discount price for SKU ${sku}: ${price}`);
-                } else {
-                    Logger.debug(`Skipping discount price for non-existent SKU ${sku}`);
-                }
-            }
-            Logger.info(`Found ${discountPrices.size} valid discount prices for existing Shopify variants`);
-        } catch (error) {
-            Logger.error('Failed to load discount prices, continuing without discounts:', error);
-        }
 
         // Separate products into discount and regular
         Logger.section('Processing Products');
@@ -902,18 +954,25 @@ async function main() {
         const regularProducts = new Map();
 
         for (const [sku, data] of filteredData) {
-            const [numericSku, paddedSku] = normalizeSkuForMatching(sku);
-            // Try all possible SKU formats for discount matching
-            if (discountPrices.has(sku) || discountPrices.has(numericSku) || discountPrices.has(paddedSku)) {
-                // Get the discount price from whichever format matched
-                const discountPrice = discountPrices.get(sku) || discountPrices.get(numericSku) || discountPrices.get(paddedSku);
-                discountProducts.set(sku, {
+            const normalized = normalizeSkuForMatching(sku);
+            
+            // Skip if already processed for discounts
+            if (ProcessedSkus.hasBeenProcessedForDiscount(sku)) {
+                Logger.debug(`Skipping already processed discount SKU ${sku}`);
+                continue;
+            }
+            
+            // Check for discount price
+            if (normalized.isValid && (discountPrices.has(normalized.cleaned) || discountPrices.has(normalized.padded))) {
+                const discountPrice = discountPrices.get(normalized.cleaned) || discountPrices.get(normalized.padded);
+                discountProducts.set(normalized.cleaned, {
                     ...data,
                     discountPrice: discountPrice
                 });
+                ProcessedSkus.markAsDiscountProcessed(sku);
                 Logger.debug(`Marked SKU ${sku} as discount product with price ${discountPrice}`);
             } else {
-                regularProducts.set(sku, data);
+                regularProducts.set(normalized.cleaned, data);
                 Logger.debug(`Marked SKU ${sku} as regular product`);
             }
         }
