@@ -426,6 +426,25 @@ async function updateInventoryLevel(inventoryItemId, locationId, quantity) {
 }
 
 // --- Main Functions ---
+/**
+ * Función para limpiar el SKU eliminando caracteres no numéricos y ceros a la izquierda.
+ * @param {String} sku - El SKU original.
+ * @returns {String} - El SKU limpio.
+ */
+function cleanSku(sku) {
+    if (!sku) return '0';
+    const cleaned = sku.toString().trim().replace(/[^0-9]/g, '').replace(/^0+/, '');
+    return cleaned || '0';
+}
+
+// Replace the normalizeSkuForMatching function with this new one
+const normalizeSkuForMatching = (sku) => {
+    const cleanedSku = cleanSku(sku);
+    // Only pad if it's a valid numeric SKU
+    const paddedSku = /^\d{1,5}$/.test(cleanedSku) ? cleanedSku.padStart(5, '0') : cleanedSku;
+    return [cleanedSku, paddedSku];
+};
+
 async function getOriginalData() {
     try {
         Logger.info('Fetching data from API...');
@@ -447,34 +466,36 @@ async function getOriginalData() {
 
         for (const product of products) {
             const rawSku = (product.Referencia || product.CodigoProducto || '').toString().trim();
-            // Convert to string and pad with zeros if needed (up to 5 digits)
-            const paddedSku = rawSku.padStart(5, '0');
-            const numericSku = rawSku.replace(/^0+/, ''); // Remove leading zeros for comparison
+            const [cleanedSku, paddedSku] = normalizeSkuForMatching(rawSku);
             
             // Log SKU processing
-            Logger.debug(`Processing SKU - Raw: ${rawSku}, Padded: ${paddedSku}, Numeric: ${numericSku}`);
+            Logger.debug(`Processing SKU - Raw: ${rawSku}, Cleaned: ${cleanedSku}, Padded: ${paddedSku}`);
             
             // Only process if SKU is purely numeric (1-5 digits)
-            if (/^\d{1,5}$/.test(numericSku)) {
+            if (/^\d{1,5}$/.test(cleanedSku)) {
                 const price = parseFloat(product.Venta1 || 0);
                 if (!isNaN(price) && price > 0) {
-                    // Store both padded and non-padded versions
-                    dataMap.set(paddedSku, {
+                    // Store both cleaned and padded versions
+                    const productData = {
                         price,
                         inventory: 0,
                         originalSku: rawSku
-                    });
-                    dataMap.set(numericSku, {
-                        price,
-                        inventory: 0,
-                        originalSku: rawSku
-                    });
+                    };
+                    
+                    // Store all possible SKU formats for matching
+                    dataMap.set(rawSku, productData);
+                    dataMap.set(cleanedSku, productData);
+                    dataMap.set(paddedSku, productData);
+                    
                     processedSkus.add(rawSku);
+                    Logger.debug(`Stored price for SKU ${rawSku} (${cleanedSku}, ${paddedSku}): ${price}`);
                 } else {
                     skippedZeroPrices++;
+                    Logger.debug(`Skipped zero/invalid price for SKU ${rawSku}: ${product.Venta1}`);
                 }
             } else {
                 skippedNonNumeric++;
+                Logger.debug(`Skipped non-numeric SKU: ${rawSku}`);
             }
         }
         
@@ -489,25 +510,33 @@ async function getOriginalData() {
         // Update inventory quantities
         for (const item of inventory) {
             const rawSku = (item.Referencia || item.CodigoProducto || '').toString().trim();
-            const paddedSku = rawSku.padStart(5, '0');
-            const numericSku = rawSku.replace(/^0+/, '');
+            const [cleanedSku, paddedSku] = normalizeSkuForMatching(rawSku);
             
-            if (/^\d{1,5}$/.test(numericSku)) {
+            if (/^\d{1,5}$/.test(cleanedSku)) {
                 const realInventory = parseFloat(item.CantidadInicial || 0) + 
                                     parseFloat(item.CantidadEntradas || 0) - 
                                     parseFloat(item.CantidadSalidas || 0);
                 
-                // Try both padded and non-padded versions
-                if (dataMap.has(paddedSku)) {
-                    dataMap.get(paddedSku).inventory = Math.max(0, Math.round(realInventory));
-                    processedInvSkus.add(rawSku);
+                // Try all possible SKU formats
+                const skuFormats = [rawSku, cleanedSku, paddedSku];
+                let matched = false;
+                
+                for (const sku of skuFormats) {
+                    if (dataMap.has(sku)) {
+                        dataMap.get(sku).inventory = Math.max(0, Math.round(realInventory));
+                        processedInvSkus.add(rawSku);
+                        matched = true;
+                        Logger.debug(`Updated inventory for SKU ${rawSku} (${cleanedSku}, ${paddedSku}): ${realInventory}`);
+                        break;
+                    }
                 }
-                if (dataMap.has(numericSku)) {
-                    dataMap.get(numericSku).inventory = Math.max(0, Math.round(realInventory));
-                    processedInvSkus.add(rawSku);
+                
+                if (!matched) {
+                    Logger.debug(`No matching product found for inventory SKU ${rawSku}`);
                 }
             } else {
                 skippedInvNonNumeric++;
+                Logger.debug(`Skipped non-numeric inventory SKU: ${rawSku}`);
             }
         }
         
@@ -548,27 +577,33 @@ async function loadDiscountPrices() {
                 .pipe(csv())
                 .on('data', (row) => {
                     rowCount++;
-                    const sku = row.sku?.toString().trim();
+                    const rawSku = row.sku?.toString().trim();
                     const price = parseFloat(row.discount);
                     
-                    if (!sku) {
+                    if (!rawSku) {
                         Logger.warn(`Row ${rowCount}: Empty SKU`);
                         errorCount++;
                         return;
                     }
                     
                     if (isNaN(price) || price <= 0) {
-                        Logger.warn(`Row ${rowCount}: Invalid price for SKU ${sku}: ${row.discount}`);
+                        Logger.warn(`Row ${rowCount}: Invalid price for SKU ${rawSku}: ${row.discount}`);
                         errorCount++;
                         return;
                     }
                     
-                    // Store both padded and non-padded versions of the SKU
-                    const [numericSku, paddedSku] = normalizeSkuForMatching(sku);
-                    discountPrices.set(sku, price);
-                    discountPrices.set(numericSku, price);
-                    discountPrices.set(paddedSku, price);
-                    Logger.info(`Found discount for SKU ${sku} (also matching ${numericSku}, ${paddedSku}): ${price}`);
+                    const [cleanedSku, paddedSku] = normalizeSkuForMatching(rawSku);
+                    
+                    // Store all possible SKU formats for matching
+                    if (/^\d{1,5}$/.test(cleanedSku)) {
+                        discountPrices.set(rawSku, price);
+                        discountPrices.set(cleanedSku, price);
+                        discountPrices.set(paddedSku, price);
+                        Logger.debug(`Found discount for SKU ${rawSku} (${cleanedSku}, ${paddedSku}): ${price}`);
+                    } else {
+                        Logger.warn(`Row ${rowCount}: Non-numeric SKU ${rawSku}`);
+                        errorCount++;
+                    }
                 })
                 .on('end', () => {
                     Logger.info(`Processed ${rowCount} rows from CSV`);
@@ -762,15 +797,6 @@ function formatPriceChange(oldPrice, newPrice) {
 function formatInventoryChange(oldQty, newQty) {
     return `${oldQty} → ${newQty} units`;
 }
-
-// Add this before the SKU matching loop
-const normalizeSkuForMatching = (sku) => {
-    // Remove leading zeros
-    const numericSku = sku.replace(/^0+/, '');
-    // Pad to 5 digits for matching
-    const paddedSku = numericSku.padStart(5, '0');
-    return [numericSku, paddedSku];
-};
 
 // Add this to the price update logic
 const validatePriceChange = (currentPrice, newPrice, threshold = 0.5) => {
