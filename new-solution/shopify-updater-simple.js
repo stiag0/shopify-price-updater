@@ -1010,40 +1010,30 @@ async function main() {
 
                 if (UPDATE_MODE === 'price' || UPDATE_MODE === 'both') {
                     const currentPrice = parseFloat(variant.price);
-                    const currentCompareAtPrice = parseFloat(variant.compareAtPrice || variant.compare_at_price) || null;
                     const newPrice = parseFloat(data.discountPrice);
-                    const newCompareAtPrice = parseFloat(data.price);
+                    const newCompareAtPrice = parseFloat(data.price);  // Original price becomes compare-at price
 
-                    // Check if either price or compare-at-price needs updating
-                    if (currentPrice !== newPrice || currentCompareAtPrice !== newCompareAtPrice) {
-                        if (validatePriceChange(currentPrice, newPrice)) {
-                            updates.price = newPrice.toString();
-                            updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = newCompareAtPrice.toString();
-                            needsUpdate = true;
-                            
-                            // Log both price changes
-                            const priceChangeMsg = Logger.logPriceChange(sku, productName, currentPrice, newPrice);
-                            const compareChangeMsg = Logger.logPriceChange(
-                                sku, 
-                                productName,
-                                currentCompareAtPrice || 'None',
-                                newCompareAtPrice,
-                                'compare'
-                            );
-                            
-                            changes.push(priceChangeMsg);
-                            changes.push(compareChangeMsg);
-                            stats.priceUpdates++;
-                            
-                            Logger.debug(`Updating discount product ${sku}:
-                                Current Price: ${currentPrice} -> New Price: ${newPrice}
-                                Current Compare At: ${currentCompareAtPrice} -> New Compare At: ${newCompareAtPrice}`);
-                        } else {
-                            Logger.warn(`Skipping suspicious price update for SKU ${sku} (${productName})`);
-                            stats.skippedPriceUpdates++;
-                        }
+                    // Only update if the compare-at price is higher than the regular price
+                    if (newCompareAtPrice > newPrice) {
+                        updates.price = newPrice.toString();
+                        updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = newCompareAtPrice.toString();
+                        needsUpdate = true;
+                        
+                        const priceChangeMsg = Logger.logPriceChange(sku, productName, currentPrice, newPrice);
+                        const compareChangeMsg = Logger.logPriceChange(
+                            sku, 
+                            productName,
+                            variant.compareAtPrice || variant.compare_at_price || 'None',
+                            newCompareAtPrice,
+                            'compare'
+                        );
+                        
+                        changes.push(priceChangeMsg);
+                        changes.push(compareChangeMsg);
+                        stats.priceUpdates++;
                     } else {
-                        Logger.debug(`No price update needed for SKU ${sku} (current: ${currentPrice}, discount: ${newPrice})`);
+                        Logger.warn(`Skipping invalid compare-at price for SKU ${sku} (${productName}): Compare-at price (${newCompareAtPrice}) must be higher than regular price (${newPrice})`);
+                        stats.skippedPriceUpdates++;
                     }
                 }
 
@@ -1101,27 +1091,14 @@ async function main() {
                     if (currentPrice !== data.price) {
                         if (validatePriceChange(currentPrice, data.price)) {
                             updates.price = data.price.toString();
+                            // Always set compare-at price to null for regular products
                             updates[USE_REST_API === 'true' ? 'compare_at_price' : 'compareAtPrice'] = null;
                             needsUpdate = true;
                             
-                            // Log price changes with more detail
                             const priceChangeMsg = Logger.logPriceChange(sku, productName, currentPrice, data.price);
                             changes.push(priceChangeMsg);
                             
-                            if (variant.compareAtPrice || variant.compare_at_price) {
-                                const compareChangeMsg = Logger.logPriceChange(
-                                    sku, 
-                                    productName,
-                                    variant.compareAtPrice || variant.compare_at_price,
-                                    null,
-                                    'compare'
-                                );
-                                changes.push(compareChangeMsg);
-                            }
                             stats.priceUpdates++;
-                        } else {
-                            Logger.warn(`Skipping suspicious price update for SKU ${sku} (${productName})`);
-                            stats.skippedPriceUpdates++;
                         }
                     }
                 }
