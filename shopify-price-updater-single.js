@@ -24,26 +24,33 @@ const fs = require('fs');
 const csv = require('csv-parser');
 const { RateLimiter } = require('limiter');
 const path = require('path');
+const { Readable } = require('stream');
 
 // Environment variables with defaults
 const {
     SHOPIFY_SHOP_NAME,
     SHOPIFY_ACCESS_TOKEN,
-    SHOPIFY_RATE_LIMIT = '2'
+    DISCOUNT_CSV_PATH,
+    SHOPIFY_API_VERSION = '2024-01',
+    MAX_RETRIES = '3',
+    USE_REST_API = 'false'
 } = process.env;
 
 // Fixed file paths to match original setup
 const CSV_FILE_PATH = path.join(process.cwd(), 'prices.csv');
 
 // Validate required environment variables
-if (!SHOPIFY_SHOP_NAME || !SHOPIFY_ACCESS_TOKEN) {
+if (!SHOPIFY_SHOP_NAME || !SHOPIFY_ACCESS_TOKEN || !DISCOUNT_CSV_PATH) {
     console.error(`
 Error: Missing required environment variables!
 
 Required .env file contents:
 SHOPIFY_SHOP_NAME=your-store-name
 SHOPIFY_ACCESS_TOKEN=your-access-token
-SHOPIFY_RATE_LIMIT=2 (optional)
+DISCOUNT_CSV_PATH=your-google-sheets-url
+SHOPIFY_API_VERSION=2024-01 (optional)
+MAX_RETRIES=3 (optional)
+USE_REST_API=false (optional)
 
 Please check your .env file and try again.
 `);
@@ -64,9 +71,7 @@ XYZ789,29.99
 }
 
 // Constants
-const SHOPIFY_API_VERSION = '2024-10';
 const GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
-const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000; // 1 second
 
 // Initialize rate limiter
@@ -239,6 +244,17 @@ async function updateVariantPrice(variantId, newPrice, compareAtPrice = null) {
     }
 }
 
+// Helper function to fetch CSV from Google Sheets
+async function fetchCsvFromGoogleSheets() {
+    try {
+        const response = await axios.get(DISCOUNT_CSV_PATH);
+        return response.data;
+    } catch (error) {
+        console.error('Error fetching CSV from Google Sheets:', error.message);
+        throw error;
+    }
+}
+
 // Main function to process CSV and update prices
 async function updatePricesFromCSV() {
     console.log('Starting price update process...');
@@ -257,11 +273,17 @@ async function updatePricesFromCSV() {
         notFound: 0
     };
 
-    // Process CSV file
-    console.log('Processing prices.csv file...');
+    // Fetch and process CSV from Google Sheets
+    console.log('Fetching CSV from Google Sheets...');
+    const csvData = await fetchCsvFromGoogleSheets();
+    
+    // Create a readable stream from the CSV string
     const processCSV = new Promise((resolve, reject) => {
-        fs.createReadStream(CSV_FILE_PATH)
-            .pipe(csv())
+        const s = new Readable();
+        s.push(csvData);
+        s.push(null);
+
+        s.pipe(csv())
             .on('data', async (row) => {
                 stats.total++;
                 
@@ -332,7 +354,7 @@ async function updatePricesFromCSV() {
                 resolve();
             })
             .on('error', (error) => {
-                console.error('Error reading CSV:', error);
+                console.error('Error processing CSV:', error);
                 reject(error);
             });
     });
