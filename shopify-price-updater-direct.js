@@ -424,6 +424,7 @@ async function getDiscountPrices() {
         const lines = response.data.split('\n');
         const priceMap = new Map();
         let skuFormats = new Set();
+        let uniqueSkuCount = 0;  // Track actual number of SKUs
 
         // Skip header row
         for (let i = 1; i < lines.length; i++) {
@@ -448,6 +449,7 @@ async function getDiscountPrices() {
                         }
                         
                         skuFormats.add(`${sku} -> ${normalized.cleaned} (padded: ${normalized.padded})`);
+                        uniqueSkuCount++; // Increment for each unique SKU
                     }
                 }
             }
@@ -459,7 +461,10 @@ async function getDiscountPrices() {
             Logger.info(`  ${format}`);
         });
 
-        return priceMap;
+        return {
+            priceMap,
+            uniqueCount: uniqueSkuCount  // Return both the map and the unique count
+        };
     } catch (error) {
         Logger.error('Error fetching discount prices:', error.message);
         throw error;
@@ -476,15 +481,17 @@ async function updatePrices() {
     try {
         // Fetch all data
         Logger.section('Data Fetching');
-        const [shopifyVariants, originalPrices, discountPrices] = await Promise.all([
+        const [shopifyVariants, originalPrices, discountPricesResult] = await Promise.all([
             getAllShopifyVariants(),
             getOriginalPrices(),
             getDiscountPrices()
         ]);
 
+        const discountPrices = discountPricesResult.priceMap;
+
         Logger.info(`Found ${shopifyVariants.size} variants in Shopify`);
         Logger.info(`Loaded ${originalPrices.size} original prices`);
-        Logger.info(`Loaded ${discountPrices.size} discount prices`);
+        Logger.info(`Loaded ${discountPricesResult.uniqueCount} discount prices`);  // Use the actual count
 
         // Log Shopify SKU formats
         const shopifySkuFormats = new Set();
