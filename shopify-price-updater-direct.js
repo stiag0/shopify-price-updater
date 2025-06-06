@@ -111,11 +111,22 @@ function normalizeSkuForMatching(sku) {
     }
 
     if (/^\d+$/.test(cleaned)) {
-        const padded = cleaned.padStart(5, '0');
-        return { isValid: true, cleaned, padded };
+        const unpadded = cleaned.replace(/^0+/, '');
+        const padded = unpadded.padStart(5, '0');
+        return { 
+            isValid: true, 
+            cleaned: unpadded,
+            padded,
+            original: cleaned
+        };
     }
 
-    return { isValid: true, cleaned, padded: cleaned };
+    return { 
+        isValid: true, 
+        cleaned: cleaned, 
+        padded: cleaned,
+        original: cleaned 
+    };
 }
 
 async function delay(ms) {
@@ -353,6 +364,7 @@ async function getOriginalPrices() {
         const priceMap = new Map();
         let processedCount = 0;
         let invalidCount = 0;
+        let skuFormats = new Set();
 
         products.forEach(product => {
             if (!product.CodigoProducto) {
@@ -369,14 +381,27 @@ async function getOriginalPrices() {
                     return;
                 }
 
-                priceMap.set(normalized.cleaned, {
+                const productData = {
                     originalPrice: price,
-                    rawSku: product.CodigoProducto // Keep original SKU for debugging
-                });
+                    rawSku: product.CodigoProducto
+                };
+
+                priceMap.set(normalized.cleaned, productData);
+                if (normalized.padded !== normalized.cleaned) {
+                    priceMap.set(normalized.padded, productData);
+                }
+                
+                skuFormats.add(`${product.CodigoProducto} -> ${normalized.cleaned} (padded: ${normalized.padded})`);
                 processedCount++;
             } else {
                 invalidCount++;
             }
+        });
+
+        // Log SKU format examples
+        Logger.info('SKU format examples (first 5):');
+        [...skuFormats].slice(0, 5).forEach(format => {
+            Logger.info(`  ${format}`);
         });
 
         Logger.info(`Successfully processed ${processedCount} products (${invalidCount} invalid entries skipped)`);
@@ -398,6 +423,7 @@ async function getDiscountPrices() {
         const response = await axios.get(DISCOUNT_CSV_PATH);
         const lines = response.data.split('\n');
         const priceMap = new Map();
+        let skuFormats = new Set();
 
         // Skip header row
         for (let i = 1; i < lines.length; i++) {
@@ -410,13 +436,28 @@ async function getDiscountPrices() {
                 if (normalized.isValid) {
                     const newPrice = parseFloat(price);
                     if (!isNaN(newPrice)) {
-                        priceMap.set(normalized.cleaned, {
-                            newPrice: newPrice
-                        });
+                        const priceData = {
+                            newPrice: newPrice,
+                            rawSku: sku
+                        };
+                        
+                        // Store both padded and unpadded versions for numeric SKUs
+                        priceMap.set(normalized.cleaned, priceData);
+                        if (normalized.padded !== normalized.cleaned) {
+                            priceMap.set(normalized.padded, priceData);
+                        }
+                        
+                        skuFormats.add(`${sku} -> ${normalized.cleaned} (padded: ${normalized.padded})`);
                     }
                 }
             }
         }
+
+        // Log SKU format examples
+        Logger.info('Discount SKU format examples (first 5):');
+        [...skuFormats].slice(0, 5).forEach(format => {
+            Logger.info(`  ${format}`);
+        });
 
         return priceMap;
     } catch (error) {
@@ -444,6 +485,19 @@ async function updatePrices() {
         Logger.info(`Found ${shopifyVariants.size} variants in Shopify`);
         Logger.info(`Loaded ${originalPrices.size} original prices`);
         Logger.info(`Loaded ${discountPrices.size} discount prices`);
+
+        // Log Shopify SKU formats
+        const shopifySkuFormats = new Set();
+        for (const [sku, variant] of shopifyVariants.entries()) {
+            const normalized = normalizeSkuForMatching(variant.sku);
+            shopifySkuFormats.add(`${variant.sku} -> ${normalized.cleaned} (padded: ${normalized.padded})`);
+            if (shopifySkuFormats.size >= 5) break; // Just show first 5 examples
+        }
+
+        Logger.info('Shopify SKU format examples (first 5):');
+        [...shopifySkuFormats].forEach(format => {
+            Logger.info(`  ${format}`);
+        });
 
         // Process updates
         Logger.section('Processing Updates');
