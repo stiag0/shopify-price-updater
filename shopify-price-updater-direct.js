@@ -80,6 +80,14 @@ const shopifyLimiter = new RateLimiter({
     interval: 'second'
 });
 
+// Create a separate axios instance for local API with timeout
+const localApiClient = axios.create({
+    timeout: 5000, // 5 seconds timeout
+    headers: {
+        'Accept': 'application/json'
+    }
+});
+
 const shopifyClient = axios.create({
     baseURL: `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`,
     headers: {
@@ -242,24 +250,77 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice) {
 // --- Data Loading Functions ---
 async function getOriginalPrices() {
     try {
-        const response = await axios.get(DATA_API_URL);
-        const products = response.data.d;
-        const priceMap = new Map();
-
-        products.forEach(product => {
-            if (product.CodigoProducto) {
-                const normalized = normalizeSkuForMatching(product.CodigoProducto);
-                if (normalized.isValid) {
-                    priceMap.set(normalized.cleaned, {
-                        originalPrice: parseFloat(product.Venta1) || 0
-                    });
+        Logger.info(`Fetching original prices from ${DATA_API_URL}`);
+        const response = await fetchWithRetry(async () => {
+            try {
+                const result = await localApiClient.get(DATA_API_URL);
+                if (!result.data || !result.data.d) {
+                    throw new Error('Invalid API response format - missing data.d property');
                 }
+                return result;
+            } catch (err) {
+                if (err.code === 'ECONNREFUSED') {
+                    throw new Error(`Connection refused to local API at ${DATA_API_URL}. Is the API server running?`);
+                }
+                if (err.code === 'ETIMEDOUT') {
+                    throw new Error(`Connection timed out while trying to reach ${DATA_API_URL}`);
+                }
+                if (err.response) {
+                    // The request was made and the server responded with a status code
+                    // that falls out of the range of 2xx
+                    throw new Error(`API Error: ${err.response.status} - ${err.response.statusText}\nData: ${JSON.stringify(err.response.data)}`);
+                } else if (err.request) {
+                    // The request was made but no response was received
+                    throw new Error(`No response received from ${DATA_API_URL}. Please check if the API is accessible.`);
+                }
+                throw err; // Re-throw other errors
             }
         });
 
+        const products = response.data.d;
+        if (!Array.isArray(products)) {
+            throw new Error(`Expected array of products but got ${typeof products}: ${JSON.stringify(products).substring(0, 100)}...`);
+        }
+
+        const priceMap = new Map();
+        let processedCount = 0;
+        let invalidCount = 0;
+
+        products.forEach(product => {
+            if (!product.CodigoProducto) {
+                invalidCount++;
+                return;
+            }
+
+            const normalized = normalizeSkuForMatching(product.CodigoProducto);
+            if (normalized.isValid) {
+                const price = parseFloat(product.Venta1);
+                if (isNaN(price)) {
+                    Logger.warn(`Invalid price for SKU ${product.CodigoProducto}: ${product.Venta1}`);
+                    invalidCount++;
+                    return;
+                }
+
+                priceMap.set(normalized.cleaned, {
+                    originalPrice: price,
+                    rawSku: product.CodigoProducto // Keep original SKU for debugging
+                });
+                processedCount++;
+            } else {
+                invalidCount++;
+            }
+        });
+
+        Logger.info(`Successfully processed ${processedCount} products (${invalidCount} invalid entries skipped)`);
         return priceMap;
+
     } catch (error) {
-        Logger.error('Error fetching original prices:', error.message);
+        Logger.error('Error fetching original prices:');
+        Logger.error(`URL: ${DATA_API_URL}`);
+        Logger.error(`Error: ${error.message}`);
+        if (error.stack) {
+            Logger.error(`Stack: ${error.stack}`);
+        }
         throw error;
     }
 }
