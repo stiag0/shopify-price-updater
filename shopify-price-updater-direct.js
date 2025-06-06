@@ -254,9 +254,77 @@ async function getOriginalPrices() {
         const response = await fetchWithRetry(async () => {
             try {
                 const result = await localApiClient.get(DATA_API_URL);
-                if (!result.data || !result.data.d) {
-                    throw new Error('Invalid API response format - missing data.d property');
+                
+                // Debug the actual response structure
+                Logger.info('API Response received. Analyzing structure...');
+                Logger.info(`Response status: ${result.status}`);
+                Logger.info(`Content-Type: ${result.headers['content-type']}`);
+                
+                // Check if we got any data
+                if (!result.data) {
+                    throw new Error('Empty response from API');
                 }
+
+                // Log the structure of the response
+                Logger.info('Response data structure: ' + JSON.stringify({
+                    keys: Object.keys(result.data),
+                    hasD: 'd' in result.data,
+                    dataType: typeof result.data,
+                    isArray: Array.isArray(result.data),
+                    preview: JSON.stringify(result.data).substring(0, 200) + '...'
+                }));
+
+                // Handle different response formats
+                let products;
+                if (result.data.d) {
+                    // OData format
+                    products = result.data.d;
+                } else if (Array.isArray(result.data)) {
+                    // Direct array format
+                    products = result.data;
+                } else if (typeof result.data === 'object' && Object.keys(result.data).length > 0) {
+                    // Try to find an array in the response
+                    const possibleArrays = Object.values(result.data).filter(val => Array.isArray(val));
+                    if (possibleArrays.length === 1) {
+                        products = possibleArrays[0];
+                    } else {
+                        throw new Error(`Unexpected API response structure. Available keys: ${Object.keys(result.data).join(', ')}`);
+                    }
+                } else {
+                    throw new Error('Could not find product data in API response');
+                }
+
+                // Validate that we have an array of products
+                if (!Array.isArray(products)) {
+                    throw new Error(`Expected array of products but got ${typeof products}`);
+                }
+
+                // Validate the first product has the required fields
+                if (products.length > 0) {
+                    const firstProduct = products[0];
+                    Logger.info('First product structure: ' + JSON.stringify(firstProduct));
+                    
+                    if (!firstProduct.CodigoProducto) {
+                        // Check if we need to map different field names
+                        const possibleSkuFields = ['sku', 'codigo', 'code', 'id'];
+                        const foundSkuField = Object.keys(firstProduct).find(key => 
+                            possibleSkuFields.includes(key.toLowerCase())
+                        );
+                        
+                        if (foundSkuField) {
+                            Logger.info(`Found alternative SKU field: ${foundSkuField}`);
+                            // Remap the data structure
+                            products = products.map(p => ({
+                                CodigoProducto: p[foundSkuField],
+                                Venta1: p.price || p.venta || p.precio || p.value || p.Venta1
+                            }));
+                        } else {
+                            throw new Error(`Product structure missing CodigoProducto. Available fields: ${Object.keys(firstProduct).join(', ')}`);
+                        }
+                    }
+                }
+
+                result.data = { d: products }; // Normalize to expected format
                 return result;
             } catch (err) {
                 if (err.code === 'ECONNREFUSED') {
