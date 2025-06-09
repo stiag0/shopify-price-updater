@@ -1002,6 +1002,133 @@ async function updatePrices() {
         Logger.info(`Skipped: ${stats.skipped}`);
         Logger.info(`Errors: ${stats.errors}`);
 
+        // Add this new debug section after the existing DEBUG INFO
+        Logger.section('MISSING SKU ANALYSIS');
+
+        // Collect all missing SKUs from discount CSV
+        const missingSkus = [];
+        for (const [sku, discountData] of discountPrices) {
+            if (!shopifyVariants.has(sku)) {
+                missingSkus.push({
+                    sku,
+                    discountPrice: discountData.newPrice,
+                    rawSku: discountData.rawSku
+                });
+            }
+        }
+
+        Logger.info(`Found ${missingSkus.length} missing SKUs in discount CSV:`);
+        missingSkus.forEach(item => {
+            Logger.info(`  SKU: ${item.sku} | Discount Price: $${item.discountPrice}`);
+        });
+
+        // Group existing products by similar names to find variants
+        Logger.info('\nExisting products grouped by brand/type (first 15 groups):');
+        const productGroups = new Map();
+        let groupCount = 0;
+
+        for (const [sku, variant] of shopifyVariants) {
+            const name = variant.product.title.toLowerCase();
+            // Extract brand/product type (first 3-4 words)
+            const nameKey = name.split(' ').slice(0, 4).join(' ');
+            
+            if (!productGroups.has(nameKey)) {
+                productGroups.set(nameKey, []);
+            }
+            productGroups.get(nameKey).push({
+                sku,
+                name: variant.product.title,
+                price: parseFloat(variant.price),
+                compareAt: variant.compareAtPrice
+            });
+        }
+
+        // Sort groups by number of variants (most variants first)
+        const sortedGroups = Array.from(productGroups.entries())
+            .sort((a, b) => b[1].length - a[1].length);
+
+        for (const [groupName, products] of sortedGroups) {
+            if (groupCount < 15 && products.length > 1) {
+                Logger.info(`\nGroup: "${groupName}..." (${products.length} variants)`);
+                products.forEach(p => {
+                    Logger.info(`  SKU: ${p.sku} | "${p.name}" | $${p.price}`);
+                });
+                groupCount++;
+            }
+        }
+
+        // Suggest possible matches for missing SKUs
+        Logger.info('\nMISSING SKU MATCH SUGGESTIONS:');
+        for (const missingItem of missingSkus) {
+            Logger.info(`\nMissing SKU: ${missingItem.sku} (Target price: $${missingItem.discountPrice})`);
+            
+            // Find products with similar prices (within 30% range)
+            const priceMatches = [];
+            for (const [sku, variant] of shopifyVariants) {
+                const currentPrice = parseFloat(variant.price);
+                const priceDiff = Math.abs(currentPrice - missingItem.discountPrice);
+                const pricePercent = (priceDiff / missingItem.discountPrice) * 100;
+                
+                if (pricePercent <= 30) { // Within 30% of target price
+                    priceMatches.push({
+                        sku,
+                        name: variant.product.title,
+                        price: currentPrice,
+                        priceDiff,
+                        pricePercent: pricePercent.toFixed(1)
+                    });
+                }
+            }
+            
+            // Sort by price difference (closest matches first)
+            priceMatches.sort((a, b) => a.priceDiff - b.priceDiff);
+            
+            if (priceMatches.length > 0) {
+                Logger.info(`  Found ${priceMatches.length} possible matches by price:`);
+                priceMatches.slice(0, 5).forEach(match => {
+                    Logger.info(`    SKU ${match.sku}: "${match.name.substring(0, 50)}..." ($${match.price}, ${match.pricePercent}% diff)`);
+                });
+            } else {
+                Logger.info(`  No products found with similar price (±30%)`);
+            }
+            
+            // Also look for SKU pattern matches (numeric similarity)
+            if (/^\d+$/.test(missingItem.sku)) {
+                const numericSku = parseInt(missingItem.sku);
+                const nearbySkus = [];
+                
+                for (const [sku, variant] of shopifyVariants) {
+                    if (/^\d+$/.test(sku)) {
+                        const existingSku = parseInt(sku);
+                        const skuDiff = Math.abs(existingSku - numericSku);
+                        if (skuDiff <= 10 && skuDiff > 0) { // Within 10 numbers
+                            nearbySkus.push({
+                                sku,
+                                name: variant.product.title,
+                                price: parseFloat(variant.price),
+                                skuDiff
+                            });
+                        }
+                    }
+                }
+                
+                if (nearbySkus.length > 0) {
+                    nearbySkus.sort((a, b) => a.skuDiff - b.skuDiff);
+                    Logger.info(`  Nearby SKUs (numeric pattern):`);
+                    nearbySkus.slice(0, 3).forEach(nearby => {
+                        Logger.info(`    SKU ${nearby.sku}: "${nearby.name.substring(0, 50)}..." ($${nearby.price})`);
+                    });
+                }
+            }
+        }
+
+        // Summary of actionable recommendations
+        Logger.info('\nRECOMMENDATIONS:');
+        Logger.info(`1. Review ${missingSkus.length} missing SKUs above for potential matches`);
+        Logger.info(`2. Check if missing SKUs are different product variants (sizes, quantities, etc.)`);
+        Logger.info(`3. Update discount CSV with correct SKUs for existing products`);
+        Logger.info(`4. Remove truly non-existent products from discount CSV`);
+
     } catch (error) {
         Logger.error('Fatal error:', error);
         throw error;
