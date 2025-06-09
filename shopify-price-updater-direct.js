@@ -149,35 +149,35 @@ async function fetchWithRetry(operation, retries = parseInt(MAX_RETRIES, 10)) {
 
 // --- Shopify API Functions ---
 async function getAllShopifyVariants() {
+    Logger.info("Fetching all product variants from Shopify...");
+    
+    // Use a simpler, more reliable GraphQL query
     const query = `
-        query {
-            products(first: 250) {
+        query GetVariants($limit: Int!) {
+            productVariants(first: $limit) {
                 edges {
                     node {
-                        title
-                        variants(first: 250) {
-                            edges {
-                                node {
-                                    id
-                                    sku
-                                    price
-                                    compareAtPrice
-                                    inventoryItem {
-                                        id
-                                        tracked
-                                        inventoryLevels(first: 1) {
-                                            edges {
-                                                node {
-                                                    available
-                                                    location {
-                                                        id
-                                                    }
-                                                }
-                                            }
+                        id
+                        sku
+                        price
+                        compareAtPrice
+                        inventoryItem {
+                            id
+                            tracked
+                            inventoryLevels(first: 1) {
+                                edges {
+                                    node {
+                                        available
+                                        location {
+                                            id
                                         }
                                     }
                                 }
                             }
+                        }
+                        product {
+                            id
+                            title
                         }
                     }
                 }
@@ -193,50 +193,85 @@ async function getAllShopifyVariants() {
         }
     `;
 
+    const variables = { limit: 250 };
+
     try {
         await shopifyLimiter.removeTokens(1);
         const response = await fetchWithRetry(() => 
-            shopifyClient.post('/graphql.json', { query })
+            shopifyClient.post('/graphql.json', { 
+                query, 
+                variables 
+            })
         );
 
+        // Better error handling
+        if (!response.data) {
+            throw new Error(`No response data received. Full response: ${JSON.stringify(response)}`);
+        }
+
+        if (response.data.errors) {
+            throw new Error(`GraphQL Errors: ${JSON.stringify(response.data.errors)}`);
+        }
+
+        if (!response.data.data) {
+            throw new Error(`No data field in response. Response structure: ${JSON.stringify(Object.keys(response.data))}`);
+        }
+
         // Extract location ID
-        const locations = response.data.data.locations.edges;
+        const locations = response.data.data.locations?.edges || [];
         if (locations.length === 0) {
             throw new Error('No locations found in Shopify');
         }
         const locationId = locations[0].node.id;
         Logger.info(`Found Shopify location: ${locations[0].node.name} (${locationId})`);
 
+        // Process variants
         const variants = new Map();
-        response.data.data.products.edges.forEach(product => {
-            product.node.variants.edges.forEach(variant => {
-                const { node } = variant;
-                if (node.sku) {
-                    const normalized = normalizeSkuForMatching(node.sku);
-                    if (normalized.isValid) {
-                        const variantData = {
-                            id: node.id,
-                            sku: node.sku,
-                            price: node.price,
-                            compareAtPrice: node.compareAtPrice,
-                            inventoryItem: node.inventoryItem,
-                            currentInventory: node.inventoryItem?.inventoryLevels?.edges[0]?.node?.available || 0,
-                            product: {
-                                title: product.node.title
-                            }
-                        };
-                        variants.set(normalized.cleaned, variantData);
-                        if (normalized.padded !== normalized.cleaned) {
-                            variants.set(normalized.padded, variantData);
+        const productVariants = response.data.data.productVariants?.edges || [];
+        
+        productVariants.forEach(edge => {
+            const node = edge.node;
+            if (node.sku) {
+                const normalized = normalizeSkuForMatching(node.sku);
+                if (normalized.isValid) {
+                    const variantData = {
+                        id: node.id,
+                        sku: node.sku,
+                        price: node.price,
+                        compareAtPrice: node.compareAtPrice,
+                        inventoryItem: node.inventoryItem,
+                        currentInventory: node.inventoryItem?.inventoryLevels?.edges[0]?.node?.available || 0,
+                        product: {
+                            title: node.product.title
                         }
+                    };
+                    variants.set(normalized.cleaned, variantData);
+                    if (normalized.padded !== normalized.cleaned) {
+                        variants.set(normalized.padded, variantData);
                     }
                 }
-            });
+            }
         });
 
+        Logger.info(`Successfully fetched ${variants.size} variants from Shopify`);
         return { variants, locationId };
+
     } catch (error) {
-        Logger.error('Error fetching variants:', error.response?.data || error.message);
+        // Enhanced error logging
+        Logger.error('Error fetching variants from Shopify:');
+        Logger.error(`Error message: ${error.message}`);
+        
+        if (error.response) {
+            Logger.error(`HTTP Status: ${error.response.status}`);
+            Logger.error(`Response headers: ${JSON.stringify(error.response.headers)}`);
+            Logger.error(`Response data: ${JSON.stringify(error.response.data)}`);
+        }
+        
+        if (error.config) {
+            Logger.error(`Request URL: ${error.config.url}`);
+            Logger.error(`Request method: ${error.config.method}`);
+        }
+        
         throw error;
     }
 }
