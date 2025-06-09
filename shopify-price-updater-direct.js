@@ -801,12 +801,12 @@ async function updatePrices() {
         // Add this debug section after loading all data
         Logger.section('DEBUG INFO');
 
-        // Show first 10 Shopify SKUs
+        // Show first 10 Shopify SKUs with product names
         Logger.info('First 10 Shopify SKUs found:');
         let count = 0;
         for (const [sku, variant] of shopifyVariants) {
             if (count < 10) {
-                Logger.info(`  ${sku} -> Price: ${variant.price}, Compare-at: ${variant.compareAtPrice || 'null'}`);
+                Logger.info(`  ${sku} (${variant.product.title}) -> Price: ${variant.price}, Compare-at: ${variant.compareAtPrice || 'null'}`);
                 count++;
             }
         }
@@ -815,11 +815,34 @@ async function updatePrices() {
         Logger.info('Discount SKUs check:');
         for (const [sku, discountData] of discountPrices) {
             const exists = shopifyVariants.has(sku);
+            const originalData = originalPrices.get(sku);
+            
             Logger.info(`  ${sku} -> Exists: ${exists}, Discount Price: ${discountData.newPrice}`);
+            
             if (exists) {
                 const variant = shopifyVariants.get(sku);
-                Logger.info(`    Current: ${variant.price}, Compare-at: ${variant.compareAtPrice || 'null'}`);
+                Logger.info(`    Product: "${variant.product.title}"`);
+                Logger.info(`    Current Shopify Price: ${variant.price}`);
+                Logger.info(`    Current Shopify Compare-at: ${variant.compareAtPrice || 'null'}`);
+                Logger.info(`    NEW Discount Price (from CSV): ${discountData.newPrice}`);
+                Logger.info(`    NEW Compare-at Price (from Local API): ${originalData?.originalPrice || 'N/A'}`);
+                
+                // Show if update is needed
+                const currentPrice = parseFloat(variant.price);
+                const newPrice = discountData.newPrice;
+                const compareAtPrice = originalData?.originalPrice;
+                const currentCompareAt = parseFloat(variant.compareAtPrice || 0);
+                
+                const priceNeedsUpdate = currentPrice !== newPrice || currentCompareAt !== compareAtPrice;
+                Logger.info(`    Update needed: ${priceNeedsUpdate ? 'YES' : 'NO'}`);
+                
+                if (priceNeedsUpdate) {
+                    Logger.info(`    Changes: Price ${currentPrice} -> ${newPrice}, Compare-at ${currentCompareAt} -> ${compareAtPrice}`);
+                }
+            } else {
+                Logger.info(`    Product: NOT FOUND IN SHOPIFY`);
             }
+            Logger.info(''); // Empty line for readability
         }
 
         // Process updates
