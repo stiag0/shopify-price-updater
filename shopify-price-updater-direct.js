@@ -62,19 +62,132 @@ const Timer = {
     }
 };
 
+// --- Enhanced Logger with file logging and graceful shutdown ---
 const Logger = {
+    logFile: null,
+    logPath: path.join(__dirname, 'logs', `shopify-sync-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.log`),
+    
+    init() {
+        // Create logs directory if it doesn't exist
+        const logDir = path.dirname(this.logPath);
+        if (!fs.existsSync(logDir)) {
+            fs.mkdirSync(logDir, { recursive: true });
+        }
+        
+        // Create log file
+        this.logFile = fs.createWriteStream(this.logPath, { flags: 'a' });
+        this.info(`Log file created: ${this.logPath}`);
+    },
+    
     log(message, level = 'INFO') {
         const timestamp = new Date().toISOString();
-        console.log(`[${timestamp}] [${level}] ${message}`);
+        const logMessage = `[${timestamp}] [${level}] ${message}`;
+        
+        // Log to console
+        console.log(logMessage);
+        
+        // Log to file if available
+        if (this.logFile) {
+            this.logFile.write(logMessage + '\n');
+        }
     },
+    
     info(message) { this.log(message, 'INFO'); },
     warn(message) { this.log(message, 'WARN'); },
     error(message) { this.log(message, 'ERROR'); },
     success(message) { this.log(message, 'SUCCESS'); },
     section(title) {
-        console.log('\n' + '='.repeat(20) + ' ' + title + ' ' + '='.repeat(20));
+        const sectionLine = '\n' + '='.repeat(20) + ' ' + title + ' ' + '='.repeat(20);
+        console.log(sectionLine);
+        if (this.logFile) {
+            this.logFile.write(sectionLine + '\n');
+        }
+    },
+    
+    async close() {
+        return new Promise((resolve) => {
+            if (this.logFile) {
+                this.logFile.end(() => {
+                    console.log(`Log file saved: ${this.logPath}`);
+                    resolve();
+                });
+            } else {
+                resolve();
+            }
+        });
     }
 };
+
+// Initialize logger
+Logger.init();
+
+// --- Graceful Shutdown Handler ---
+let isShuttingDown = false;
+let currentOperation = null;
+
+async function gracefulShutdown(signal) {
+    if (isShuttingDown) {
+        console.log('\nForce shutdown initiated...');
+        process.exit(1);
+    }
+    
+    isShuttingDown = true;
+    console.log(`\n\nReceived ${signal}. Initiating graceful shutdown...`);
+    Logger.warn(`Shutdown signal received: ${signal}`);
+    
+    try {
+        // If we're in the middle of an operation, log it
+        if (currentOperation) {
+            Logger.warn(`Interrupting current operation: ${currentOperation}`);
+        }
+        
+        // Log shutdown summary
+        const endTime = Timer.endTimer();
+        if (endTime) {
+            Logger.info(`Script execution time before shutdown: ${endTime}`);
+        }
+        
+        Logger.info('Performing cleanup operations...');
+        
+        // Give any pending operations a moment to complete
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        Logger.info('Graceful shutdown completed');
+        
+        // Close log file
+        await Logger.close();
+        
+        console.log('Cleanup completed. Exiting...');
+        process.exit(0);
+        
+    } catch (error) {
+        console.error('Error during graceful shutdown:', error.message);
+        await Logger.close();
+        process.exit(1);
+    }
+}
+
+// Register signal handlers
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));   // Ctrl+C
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Termination signal
+process.on('SIGQUIT', () => gracefulShutdown('SIGQUIT')); // Quit signal
+
+// Handle uncaught exceptions
+process.on('uncaughtException', async (error) => {
+    console.error('Uncaught Exception:', error);
+    Logger.error(`Uncaught Exception: ${error.message}`);
+    Logger.error(`Stack: ${error.stack}`);
+    await Logger.close();
+    process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', async (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    Logger.error(`Unhandled Rejection: ${reason}`);
+    await Logger.close();
+    process.exit(1);
+});
 
 // --- API Setup ---
 const shopifyLimiter = new RateLimiter({
@@ -668,6 +781,7 @@ async function updatePrices() {
 
     try {
         // Fetch all data in parallel
+        currentOperation = 'Data Fetching';
         Logger.section('Data Fetching');
         const [shopifyData, originalPrices, discountPricesResult, inventoryData] = await Promise.all([
             getAllShopifyVariants(),
@@ -685,6 +799,7 @@ async function updatePrices() {
         Logger.info(`Loaded ${inventoryData.size} inventory records`);
 
         // Process updates
+        currentOperation = 'Processing Updates';
         Logger.section('Processing Updates');
         const stats = {
             total: 0,
@@ -799,6 +914,8 @@ async function updatePrices() {
             }
         }
 
+        currentOperation = null; // Clear current operation when done
+        
         // Final statistics
         Logger.section('Summary');
         const duration = Timer.endTimer();
