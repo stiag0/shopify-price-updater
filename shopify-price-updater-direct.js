@@ -264,10 +264,13 @@ async function fetchWithRetry(operation, retries = parseInt(MAX_RETRIES, 10)) {
 async function getAllShopifyVariants() {
     Logger.info("Fetching all product variants from Shopify...");
     
-    // Updated query for newer API versions that use quantities instead of available
     const query = `
-        query GetVariants($limit: Int!) {
-            productVariants(first: $limit) {
+        query GetVariants($limit: Int!, $cursor: String) {
+            productVariants(first: $limit, after: $cursor) {
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
                 edges {
                     node {
                         id
@@ -309,75 +312,100 @@ async function getAllShopifyVariants() {
         }
     `;
 
-    const variables = { limit: 250 };
-
     try {
+        // Extract location ID first
         await shopifyLimiter.removeTokens(1);
-        const response = await fetchWithRetry(() => 
+        const locationResponse = await fetchWithRetry(() => 
             shopifyClient.post('/graphql.json', { 
-                query, 
-                variables 
+                query: `query GetLocations { locations(first: 1) { edges { node { id name } } } }`
             })
         );
 
-        // Better error handling
-        if (!response.data) {
-            throw new Error(`No response data received. Full response: ${JSON.stringify(response)}`);
-        }
-
-        if (response.data.errors) {
-            throw new Error(`GraphQL Errors: ${JSON.stringify(response.data.errors)}`);
-        }
-
-        if (!response.data.data) {
-            throw new Error(`No data field in response. Response structure: ${JSON.stringify(Object.keys(response.data))}`);
-        }
-
-        // Extract location ID
-        const locations = response.data.data.locations?.edges || [];
+        const locations = locationResponse.data.data.locations?.edges || [];
         if (locations.length === 0) {
             throw new Error('No locations found in Shopify');
         }
         const locationId = locations[0].node.id;
         Logger.info(`Found Shopify location: ${locations[0].node.name} (${locationId})`);
 
-        // Process variants
+        // Fetch all variants with pagination
         const variants = new Map();
-        const productVariants = response.data.data.productVariants?.edges || [];
-        
-        productVariants.forEach(edge => {
-            const node = edge.node;
-            if (node.sku) {
-                const normalized = normalizeSkuForMatching(node.sku);
-                if (normalized.isValid) {
-                    // Extract inventory using the new quantities structure
-                    let currentInventory = 0;
-                    const inventoryLevelEdge = node.inventoryItem?.inventoryLevels?.edges?.[0]?.node;
-                    if (inventoryLevelEdge?.quantities?.length > 0) {
-                        const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
-                        currentInventory = availableObj?.quantity || 0;
-                    }
+        let hasNextPage = true;
+        let cursor = null;
+        let totalFetched = 0;
 
-                    const variantData = {
-                        id: node.id,
-                        sku: node.sku,
-                        price: node.price,
-                        compareAtPrice: node.compareAtPrice,
-                        inventoryItem: node.inventoryItem,
-                        currentInventory: currentInventory,
-                        product: {
-                            title: node.product.title
+        while (hasNextPage) {
+            const variables = { limit: 250 };
+            if (cursor) {
+                variables.cursor = cursor;
+            }
+
+            await shopifyLimiter.removeTokens(1);
+            const response = await fetchWithRetry(() => 
+                shopifyClient.post('/graphql.json', { 
+                    query, 
+                    variables 
+                })
+            );
+
+            // Error handling
+            if (!response.data) {
+                throw new Error(`No response data received. Full response: ${JSON.stringify(response)}`);
+            }
+
+            if (response.data.errors) {
+                throw new Error(`GraphQL Errors: ${JSON.stringify(response.data.errors)}`);
+            }
+
+            if (!response.data.data) {
+                throw new Error(`No data field in response. Response structure: ${JSON.stringify(Object.keys(response.data))}`);
+            }
+
+            // Process this batch of variants
+            const productVariants = response.data.data.productVariants?.edges || [];
+            
+            productVariants.forEach(edge => {
+                const node = edge.node;
+                if (node.sku) {
+                    const normalized = normalizeSkuForMatching(node.sku);
+                    if (normalized.isValid) {
+                        // Extract inventory using the new quantities structure
+                        let currentInventory = 0;
+                        const inventoryLevelEdge = node.inventoryItem?.inventoryLevels?.edges?.[0]?.node;
+                        if (inventoryLevelEdge?.quantities?.length > 0) {
+                            const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
+                            currentInventory = availableObj?.quantity || 0;
                         }
-                    };
-                    variants.set(normalized.cleaned, variantData);
-                    if (normalized.padded !== normalized.cleaned) {
-                        variants.set(normalized.padded, variantData);
+
+                        const variantData = {
+                            id: node.id,
+                            sku: node.sku,
+                            price: node.price,
+                            compareAtPrice: node.compareAtPrice,
+                            inventoryItem: node.inventoryItem,
+                            currentInventory: currentInventory,
+                            product: {
+                                title: node.product.title
+                            }
+                        };
+                        variants.set(normalized.cleaned, variantData);
+                        if (normalized.padded !== normalized.cleaned) {
+                            variants.set(normalized.padded, variantData);
+                        }
                     }
                 }
-            }
-        });
+            });
 
-        Logger.info(`Successfully fetched ${variants.size} variants from Shopify`);
+            totalFetched += productVariants.length;
+            Logger.info(`Fetched batch: ${productVariants.length} variants (Total: ${totalFetched})`);
+
+            // Check if there are more pages
+            const pageInfo = response.data.data.productVariants?.pageInfo;
+            hasNextPage = pageInfo?.hasNextPage || false;
+            cursor = pageInfo?.endCursor || null;
+        }
+
+        Logger.info(`Successfully fetched ${totalFetched} total variants from Shopify`);
         return { variants, locationId };
 
     } catch (error) {
@@ -389,11 +417,6 @@ async function getAllShopifyVariants() {
             Logger.error(`HTTP Status: ${error.response.status}`);
             Logger.error(`Response headers: ${JSON.stringify(error.response.headers)}`);
             Logger.error(`Response data: ${JSON.stringify(error.response.data)}`);
-        }
-        
-        if (error.config) {
-            Logger.error(`Request URL: ${error.config.url}`);
-            Logger.error(`Request method: ${error.config.method}`);
         }
         
         throw error;
