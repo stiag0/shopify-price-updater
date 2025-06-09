@@ -845,8 +845,7 @@ async function updatePrices() {
             Logger.info(''); // Empty line for readability
         }
 
-        // Process updates
-        currentOperation = 'Processing Updates';
+        // Add duplicate tracking before processing
         Logger.section('Processing Updates');
         const stats = {
             total: 0,
@@ -859,6 +858,9 @@ async function updatePrices() {
             regularProducts: 0
         };
 
+        // Track processed variant IDs to avoid duplicates
+        const processedVariants = new Set();
+
         // First, process discount products from CSV
         Logger.section('Processing Discount Products');
         for (const [sku, discountData] of discountPrices) {
@@ -870,6 +872,13 @@ async function updatePrices() {
 
                 if (!variant) {
                     Logger.warn(`SKU ${sku} not found in Shopify`);
+                    stats.skipped++;
+                    continue;
+                }
+
+                // Check if we've already processed this variant
+                if (processedVariants.has(variant.id)) {
+                    Logger.info(`SKU ${sku}: Skipping duplicate (already processed as different SKU format)`);
                     stats.skipped++;
                     continue;
                 }
@@ -890,13 +899,16 @@ async function updatePrices() {
                 const inventoryNeedsUpdate = newInventory !== null && newInventory !== variant.currentInventory;
 
                 if (!priceNeedsUpdate && !inventoryNeedsUpdate) {
-                    Logger.info(`SKU ${sku}: No updates needed (Discount Product)`);
+                    Logger.info(`SKU ${sku} (${variant.product.title}): No updates needed (Discount Product)`);
                     stats.skipped++;
+                    processedVariants.add(variant.id); // Mark as processed
                     continue;
                 }
 
                 // Update variant
                 await updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId);
+                
+                Logger.info(`SKU ${sku} (${variant.product.title}): Updated successfully`);
                 
                 if (priceNeedsUpdate) {
                     stats.priceUpdates++;
@@ -904,6 +916,9 @@ async function updatePrices() {
                 }
                 if (inventoryNeedsUpdate) stats.inventoryUpdates++;
                 stats.updated++;
+                
+                // Mark this variant as processed
+                processedVariants.add(variant.id);
 
             } catch (error) {
                 Logger.error(`Error processing discount SKU ${sku}: ${error.message}`);
@@ -918,6 +933,11 @@ async function updatePrices() {
                 // Skip if this is a discount product (already processed)
                 if (discountPrices.has(sku)) {
                     continue;
+                }
+
+                // Check if we've already processed this variant
+                if (processedVariants.has(variant.id)) {
+                    continue; // Skip silently for regular products
                 }
 
                 stats.total++;
@@ -940,13 +960,16 @@ async function updatePrices() {
                 const inventoryNeedsUpdate = newInventory !== null && newInventory !== variant.currentInventory;
 
                 if (!priceNeedsUpdate && !inventoryNeedsUpdate) {
-                    Logger.info(`SKU ${sku}: No updates needed (Regular Product)`);
+                    Logger.info(`SKU ${sku} (${variant.product.title}): No updates needed (Regular Product)`);
                     stats.skipped++;
+                    processedVariants.add(variant.id); // Mark as processed
                     continue;
                 }
 
                 // Update variant
                 await updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId);
+                
+                Logger.info(`SKU ${sku} (${variant.product.title}): Updated successfully`);
                 
                 if (priceNeedsUpdate) {
                     stats.priceUpdates++;
@@ -954,6 +977,9 @@ async function updatePrices() {
                 }
                 if (inventoryNeedsUpdate) stats.inventoryUpdates++;
                 stats.updated++;
+                
+                // Mark this variant as processed
+                processedVariants.add(variant.id);
 
             } catch (error) {
                 Logger.error(`Error processing regular SKU ${sku}: ${error.message}`);
