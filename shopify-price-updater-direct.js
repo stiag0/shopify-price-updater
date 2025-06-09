@@ -151,7 +151,7 @@ async function fetchWithRetry(operation, retries = parseInt(MAX_RETRIES, 10)) {
 async function getAllShopifyVariants() {
     Logger.info("Fetching all product variants from Shopify...");
     
-    // Use a simpler, more reliable GraphQL query
+    // Updated query for newer API versions that use quantities instead of available
     const query = `
         query GetVariants($limit: Int!) {
             productVariants(first: $limit) {
@@ -167,7 +167,10 @@ async function getAllShopifyVariants() {
                             inventoryLevels(first: 1) {
                                 edges {
                                     node {
-                                        available
+                                        quantities(names: "available") {
+                                            name
+                                            quantity
+                                        }
                                         location {
                                             id
                                         }
@@ -234,13 +237,21 @@ async function getAllShopifyVariants() {
             if (node.sku) {
                 const normalized = normalizeSkuForMatching(node.sku);
                 if (normalized.isValid) {
+                    // Extract inventory using the new quantities structure
+                    let currentInventory = 0;
+                    const inventoryLevelEdge = node.inventoryItem?.inventoryLevels?.edges?.[0]?.node;
+                    if (inventoryLevelEdge?.quantities?.length > 0) {
+                        const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
+                        currentInventory = availableObj?.quantity || 0;
+                    }
+
                     const variantData = {
                         id: node.id,
                         sku: node.sku,
                         price: node.price,
                         compareAtPrice: node.compareAtPrice,
                         inventoryItem: node.inventoryItem,
-                        currentInventory: node.inventoryItem?.inventoryLevels?.edges[0]?.node?.available || 0,
+                        currentInventory: currentInventory,
                         product: {
                             title: node.product.title
                         }
