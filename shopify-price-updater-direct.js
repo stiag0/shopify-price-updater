@@ -798,6 +798,30 @@ async function updatePrices() {
         Logger.info(`Loaded ${discountPricesResult.uniqueCount} discount prices`);
         Logger.info(`Loaded ${inventoryData.size} inventory records`);
 
+        // Add this debug section after loading all data
+        Logger.section('DEBUG INFO');
+
+        // Show first 10 Shopify SKUs
+        Logger.info('First 10 Shopify SKUs found:');
+        let count = 0;
+        for (const [sku, variant] of shopifyVariants) {
+            if (count < 10) {
+                Logger.info(`  ${sku} -> Price: ${variant.price}, Compare-at: ${variant.compareAtPrice || 'null'}`);
+                count++;
+            }
+        }
+
+        // Show all discount SKUs and whether they exist
+        Logger.info('Discount SKUs check:');
+        for (const [sku, discountData] of discountPrices) {
+            const exists = shopifyVariants.has(sku);
+            Logger.info(`  ${sku} -> Exists: ${exists}, Discount Price: ${discountData.newPrice}`);
+            if (exists) {
+                const variant = shopifyVariants.get(sku);
+                Logger.info(`    Current: ${variant.price}, Compare-at: ${variant.compareAtPrice || 'null'}`);
+            }
+        }
+
         // Process updates
         currentOperation = 'Processing Updates';
         Logger.section('Processing Updates');
