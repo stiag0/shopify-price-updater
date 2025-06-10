@@ -19,7 +19,8 @@ const {
     SHOPIFY_API_VERSION = '2024-01',
     USE_REST_API = 'false',
     MAX_RETRIES = '3',
-    SHOPIFY_RATE_LIMIT = '2'
+    SHOPIFY_RATE_LIMIT = '2',
+    SAFETY_STOCK = '5'  // Units to reserve for physical store
 } = process.env;
 
 // --- Validation ---
@@ -40,6 +41,7 @@ Required variables:
 const GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 const MAX_PAGES = 20; // Maximum number of pages to fetch
 const RETRY_DELAY = 1000; // 1 second
+const SAFETY_STOCK_UNITS = parseInt(SAFETY_STOCK, 10); // Convert to integer
 
 // --- Utilities ---
 const Timer = {
@@ -505,7 +507,9 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
                 throw new Error(JSON.stringify(inventoryResponse.data.errors));
             }
 
-            Logger.info(`Updated inventory for SKU ${variant.sku}: ${variant.currentInventory} -> ${newInventory}`);
+            const inventoryInfo = inventoryData.get(variant.sku);
+            const actualQty = inventoryInfo?.actualQuantity || newInventory;
+            Logger.info(`Updated inventory for SKU ${variant.sku}: ${variant.currentInventory} -> ${newInventory} (Actual: ${actualQty}, Reserved: ${SAFETY_STOCK_UNITS})`);
         }
 
         return result.productVariant;
@@ -775,8 +779,18 @@ async function getLocalInventory() {
             }
 
             const calculatedQuantity = Math.max(0, initial + received - shipped);
+            
+            // Safety stock logic: Keep units for physical store
+            let shopifyQuantity;
+            if (calculatedQuantity <= SAFETY_STOCK_UNITS) {
+                shopifyQuantity = 0; // Reserve all units for physical store
+            } else {
+                shopifyQuantity = Math.floor(calculatedQuantity - SAFETY_STOCK_UNITS); // Keep units reserved
+            }
+            
             const inventoryData = {
-                quantity: Math.floor(calculatedQuantity),
+                quantity: shopifyQuantity,
+                actualQuantity: Math.floor(calculatedQuantity), // Keep track of actual inventory
                 rawSku: item.CodigoProducto
             };
 
@@ -801,6 +815,7 @@ async function updatePrices() {
     Logger.section('Initialization');
     Logger.info('Starting Shopify Price Updater (Direct Price Version)');
     Logger.info(`API Mode: ${USE_REST_API === 'true' ? 'REST' : 'GraphQL'}`);
+    Logger.info(`Safety Stock: ${SAFETY_STOCK_UNITS} units reserved for physical store`);
 
     try {
         // Fetch all data in parallel
@@ -840,13 +855,21 @@ async function updatePrices() {
             const exists = shopifyVariants.has(sku);
             const originalData = originalPrices.get(sku);
             
-            Logger.info(`  ${sku} -> Exists: ${exists}, Discount Price: ${discountData.newPrice}`);
+                            Logger.info(`  ${sku} -> Exists: ${exists}, Discount Price: ${discountData.newPrice}`);
             
             if (exists) {
                 const variant = shopifyVariants.get(sku);
+                const inventoryInfo = inventoryData.get(sku);
+                
                 Logger.info(`    Product: "${variant.product.title}"`);
                 Logger.info(`    Current Shopify Price: ${variant.price}`);
                 Logger.info(`    Current Shopify Compare-at: ${variant.compareAtPrice || 'null'}`);
+                Logger.info(`    Current Shopify Inventory: ${variant.currentInventory}`);
+                
+                if (inventoryInfo) {
+                    Logger.info(`    Actual Inventory: ${inventoryInfo.actualQuantity}, Shopify Inventory: ${inventoryInfo.quantity} (${SAFETY_STOCK_UNITS} reserved for store)`);
+                }
+                
                 Logger.info(`    NEW Discount Price (from CSV): ${discountData.newPrice}`);
                 Logger.info(`    NEW Compare-at Price (from Local API): ${originalData?.originalPrice || 'N/A'}`);
                 
@@ -857,10 +880,15 @@ async function updatePrices() {
                 const currentCompareAt = parseFloat(variant.compareAtPrice || 0);
                 
                 const priceNeedsUpdate = currentPrice !== newPrice || currentCompareAt !== compareAtPrice;
-                Logger.info(`    Update needed: ${priceNeedsUpdate ? 'YES' : 'NO'}`);
+                const inventoryNeedsUpdate = inventoryInfo && inventoryInfo.quantity !== variant.currentInventory;
+                
+                Logger.info(`    Update needed: ${priceNeedsUpdate || inventoryNeedsUpdate ? 'YES' : 'NO'}`);
                 
                 if (priceNeedsUpdate) {
-                    Logger.info(`    Changes: Price ${currentPrice} -> ${newPrice}, Compare-at ${currentCompareAt} -> ${compareAtPrice}`);
+                    Logger.info(`    Price Changes: ${currentPrice} -> ${newPrice}, Compare-at ${currentCompareAt} -> ${compareAtPrice}`);
+                }
+                if (inventoryNeedsUpdate) {
+                    Logger.info(`    Inventory Changes: ${variant.currentInventory} -> ${inventoryInfo.quantity} (keeping ${SAFETY_STOCK_UNITS} units reserved)`);
                 }
             } else {
                 Logger.info(`    Product: NOT FOUND IN SHOPIFY`);
