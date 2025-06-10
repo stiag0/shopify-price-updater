@@ -507,7 +507,7 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
                 throw new Error(JSON.stringify(inventoryResponse.data.errors));
             }
 
-            Logger.info(`Updated inventory for SKU ${variant.sku}: ${variant.currentInventory} -> ${newInventory} (Reserved: ${SAFETY_STOCK_UNITS})`);
+            Logger.info(`Updated inventory for SKU ${variant.sku}: ${variant.currentInventory} -> ${newInventory}`);
         }
 
         return result.productVariant;
@@ -778,12 +778,12 @@ async function getLocalInventory() {
 
             const calculatedQuantity = Math.max(0, initial + received - shipped);
             
-            // Safety stock logic: Keep units for physical store
+            // Safety stock logic: If inventory is 5 or less, don't sell online (keep all for store)
             let shopifyQuantity;
             if (calculatedQuantity <= SAFETY_STOCK_UNITS) {
-                shopifyQuantity = 0; // Reserve all units for physical store
+                shopifyQuantity = 0; // Don't sell online, keep all units for physical store
             } else {
-                shopifyQuantity = Math.floor(calculatedQuantity - SAFETY_STOCK_UNITS); // Keep units reserved
+                shopifyQuantity = Math.floor(calculatedQuantity); // Sell full amount online (enough for store)
             }
             
             const inventoryData = {
@@ -865,7 +865,10 @@ async function updatePrices() {
                 Logger.info(`    Current Shopify Inventory: ${variant.currentInventory}`);
                 
                 if (inventoryInfo) {
-                    Logger.info(`    Actual Inventory: ${inventoryInfo.actualQuantity}, Shopify Inventory: ${inventoryInfo.quantity} (${SAFETY_STOCK_UNITS} reserved for store)`);
+                    const reserveLogic = inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS ? 
+                        `all ${inventoryInfo.actualQuantity} units reserved for store` : 
+                        `${inventoryInfo.actualQuantity} units available, selling all online`;
+                    Logger.info(`    Actual Inventory: ${inventoryInfo.actualQuantity}, Shopify Inventory: ${inventoryInfo.quantity} (${reserveLogic})`);
                 }
                 
                 Logger.info(`    NEW Discount Price (from CSV): ${discountData.newPrice}`);
@@ -886,7 +889,10 @@ async function updatePrices() {
                     Logger.info(`    Price Changes: ${currentPrice} -> ${newPrice}, Compare-at ${currentCompareAt} -> ${compareAtPrice}`);
                 }
                 if (inventoryNeedsUpdate) {
-                    Logger.info(`    Inventory Changes: ${variant.currentInventory} -> ${inventoryInfo.quantity} (keeping ${SAFETY_STOCK_UNITS} units reserved)`);
+                    const changeLogic = inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS ? 
+                        `reserving all ${inventoryInfo.actualQuantity} units for store` : 
+                        `selling all ${inventoryInfo.actualQuantity} units online`;
+                    Logger.info(`    Inventory Changes: ${variant.currentInventory} -> ${inventoryInfo.quantity} (${changeLogic})`);
                 }
             } else {
                 Logger.info(`    Product: NOT FOUND IN SHOPIFY`);
