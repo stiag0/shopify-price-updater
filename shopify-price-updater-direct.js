@@ -1050,13 +1050,29 @@ async function updatePrices() {
         let reservedProducts = 0;
         let onlineProducts = 0;
         let totalReservedUnits = 0;
+        const reservedProductsList = [];
+        const onlineProductsList = [];
         
         for (const [sku, inventoryInfo] of inventoryData) {
+            // Find the corresponding Shopify variant to get product name
+            const variant = shopifyVariants.get(sku);
+            const productName = variant ? variant.product.title : 'Product not found in Shopify';
+            
             if (inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS) {
                 reservedProducts++;
                 totalReservedUnits += inventoryInfo.actualQuantity;
+                reservedProductsList.push({
+                    sku: sku,
+                    name: productName,
+                    quantity: inventoryInfo.actualQuantity
+                });
             } else {
                 onlineProducts++;
+                onlineProductsList.push({
+                    sku: sku,
+                    name: productName,
+                    quantity: inventoryInfo.actualQuantity
+                });
             }
         }
 
@@ -1078,6 +1094,23 @@ async function updatePrices() {
         Logger.info(`Products reserved for store (≤${SAFETY_STOCK_UNITS} units): ${reservedProducts}`);
         Logger.info(`Products available online (>${SAFETY_STOCK_UNITS} units): ${onlineProducts}`);
         Logger.info(`Total units reserved for physical store: ${totalReservedUnits}`);
+        
+        // List reserved products (sorted by quantity, lowest first)
+        Logger.info('\n--- PRODUCTS RESERVED FOR PHYSICAL STORE ---');
+        reservedProductsList
+            .sort((a, b) => a.quantity - b.quantity)
+            .forEach(product => {
+                Logger.info(`  SKU: ${product.sku} | Qty: ${product.quantity} | "${product.name}"`);
+            });
+        
+        // Show some examples of online products (first 20, sorted by highest quantity)
+        Logger.info('\n--- PRODUCTS AVAILABLE ONLINE (Top 20 by quantity) ---');
+        onlineProductsList
+            .sort((a, b) => b.quantity - a.quantity)
+            .slice(0, 20)
+            .forEach(product => {
+                Logger.info(`  SKU: ${product.sku} | Qty: ${product.quantity} | "${product.name}"`);
+            });
 
         // Add this new debug section after the existing DEBUG INFO
         Logger.section('MISSING SKU ANALYSIS');
