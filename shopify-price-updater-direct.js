@@ -467,6 +467,8 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
 
         // Update inventory if needed and tracked
         if (newInventory !== null && 
+            newInventory !== undefined &&
+            !isNaN(newInventory) &&
             newInventory !== variant.currentInventory && 
             variant.inventoryItem && 
             variant.inventoryItem.tracked) {
@@ -1044,6 +1046,20 @@ async function updatePrices() {
 
         currentOperation = null; // Clear current operation when done
         
+        // Calculate reserved products statistics
+        let reservedProducts = 0;
+        let onlineProducts = 0;
+        let totalReservedUnits = 0;
+        
+        for (const [sku, inventoryInfo] of inventoryData) {
+            if (inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS) {
+                reservedProducts++;
+                totalReservedUnits += inventoryInfo.actualQuantity;
+            } else {
+                onlineProducts++;
+            }
+        }
+
         // Final statistics
         Logger.section('Summary');
         const duration = Timer.endTimer();
@@ -1056,6 +1072,12 @@ async function updatePrices() {
         Logger.info(`- Inventory updates: ${stats.inventoryUpdates}`);
         Logger.info(`Skipped: ${stats.skipped}`);
         Logger.info(`Errors: ${stats.errors}`);
+        
+        Logger.section('Inventory Management');
+        Logger.info(`Safety stock threshold: ${SAFETY_STOCK_UNITS} units`);
+        Logger.info(`Products reserved for store (≤${SAFETY_STOCK_UNITS} units): ${reservedProducts}`);
+        Logger.info(`Products available online (>${SAFETY_STOCK_UNITS} units): ${onlineProducts}`);
+        Logger.info(`Total units reserved for physical store: ${totalReservedUnits}`);
 
         // Add this new debug section after the existing DEBUG INFO
         Logger.section('MISSING SKU ANALYSIS');
