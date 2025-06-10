@@ -507,9 +507,7 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
                 throw new Error(JSON.stringify(inventoryResponse.data.errors));
             }
 
-            const inventoryInfo = inventoryData.get(variant.sku);
-            const actualQty = inventoryInfo?.actualQuantity || newInventory;
-            Logger.info(`Updated inventory for SKU ${variant.sku}: ${variant.currentInventory} -> ${newInventory} (Actual: ${actualQty}, Reserved: ${SAFETY_STOCK_UNITS})`);
+            Logger.info(`Updated inventory for SKU ${variant.sku}: ${variant.currentInventory} -> ${newInventory} (Reserved: ${SAFETY_STOCK_UNITS})`);
         }
 
         return result.productVariant;
