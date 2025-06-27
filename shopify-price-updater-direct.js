@@ -755,7 +755,11 @@ async function getLocalInventory() {
         const inventoryMap = new Map();
         let processedCount = 0;
         let invalidCount = 0;
+        let duplicateSkus = 0;
 
+        // First pass: Find the latest timestamp for each SKU
+        const latestRecords = new Map(); // SKU -> { item, timestamp, normalized }
+        
         for (const item of inventoryData) {
             if (!item.CodigoProducto) {
                 invalidCount++;
@@ -768,6 +772,55 @@ async function getLocalInventory() {
                 continue;
             }
 
+            // Use Fecha field for timestamp (matches your API structure)
+            let timestamp = null;
+            if (item.Fecha) {
+                timestamp = new Date(item.Fecha);
+                if (isNaN(timestamp.getTime())) {
+                    Logger.warn(`Invalid date format for SKU ${item.CodigoProducto}: ${item.Fecha}`);
+                    timestamp = new Date(); // Fallback to current time
+                }
+            } else {
+                // Fallback to other timestamp fields if Fecha is not available
+                const possibleTimestampFields = [
+                    'FechaCreacion', 'FechaModificacion', 'Timestamp', 
+                    'CreatedAt', 'UpdatedAt', 'Date', 'Time', 'FechaHora'
+                ];
+                
+                for (const field of possibleTimestampFields) {
+                    if (item[field]) {
+                        timestamp = new Date(item[field]);
+                        if (!isNaN(timestamp.getTime())) {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // If no timestamp found, use current time (this will be the "latest" by default)
+            if (!timestamp) {
+                timestamp = new Date();
+                Logger.warn(`No timestamp field found for SKU ${item.CodigoProducto}, using current time`);
+            }
+
+            const skuKey = normalized.cleaned;
+            
+            // Check if this is the latest record for this SKU
+            if (!latestRecords.has(skuKey) || timestamp > latestRecords.get(skuKey).timestamp) {
+                latestRecords.set(skuKey, {
+                    item,
+                    timestamp,
+                    normalized
+                });
+            }
+        }
+
+        // Second pass: Process only the latest record for each SKU
+        for (const [skuKey, record] of latestRecords) {
+            const item = record.item;
+            const normalized = record.normalized;
+
+            // Use calculation method: CantidadInicial + CantidadEntradas - CantidadSalidas
             const initial = parseFloat(item.CantidadInicial || 0);
             const received = parseFloat(item.CantidadEntradas || 0);
             const shipped = parseFloat(item.CantidadSalidas || 0);
@@ -791,7 +844,15 @@ async function getLocalInventory() {
             const inventoryData = {
                 quantity: shopifyQuantity,
                 actualQuantity: Math.floor(calculatedQuantity), // Keep track of actual inventory
-                rawSku: item.CodigoProducto
+                rawSku: item.CodigoProducto,
+                timestamp: record.timestamp,
+                fecha: item.Fecha, // Store the original date for reference
+                calculation: {
+                    initial: initial,
+                    received: received,
+                    shipped: shipped,
+                    calculated: calculatedQuantity
+                }
             };
 
             inventoryMap.set(normalized.cleaned, inventoryData);
@@ -802,6 +863,15 @@ async function getLocalInventory() {
         }
 
         Logger.info(`Successfully processed ${processedCount} inventory items (${invalidCount} invalid entries skipped)`);
+        
+        // Count how many SKUs had multiple records (for informational purposes)
+        const totalRecords = inventoryData.length;
+        const uniqueSkus = latestRecords.size;
+        if (totalRecords > uniqueSkus) {
+            duplicateSkus = totalRecords - uniqueSkus;
+            Logger.info(`Found ${duplicateSkus} duplicate records across ${uniqueSkus} unique SKUs (efficiency: ${((uniqueSkus/totalRecords)*100).toFixed(1)}%)`);
+        }
+        
         return inventoryMap;
     } catch (error) {
         Logger.error('Error fetching inventory:', error.message);
