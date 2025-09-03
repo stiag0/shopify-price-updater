@@ -481,7 +481,24 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
             })
         );
 
+        // Enhanced error handling
+        if (!response.data) {
+            throw new Error(`No response data received for variant ${variant.id}`);
+        }
+
+        if (response.data.errors) {
+            throw new Error(`GraphQL Errors: ${JSON.stringify(response.data.errors)}`);
+        }
+
+        if (!response.data.data) {
+            throw new Error(`No data field in response for variant ${variant.id}. Response: ${JSON.stringify(response.data)}`);
+        }
+
         const result = response.data.data.productVariantUpdate;
+        if (!result) {
+            throw new Error(`No productVariantUpdate in response for variant ${variant.id}. Available fields: ${Object.keys(response.data.data).join(', ')}`);
+        }
+
         if (result.userErrors && result.userErrors.length > 0) {
             throw new Error(JSON.stringify(result.userErrors));
         }
@@ -526,8 +543,26 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
                 variables: inventoryVariables
             });
 
+            // Enhanced error handling for inventory update
+            if (!inventoryResponse.data) {
+                throw new Error(`No response data received for inventory update of variant ${variant.id}`);
+            }
+
             if (inventoryResponse.data.errors) {
-                throw new Error(JSON.stringify(inventoryResponse.data.errors));
+                throw new Error(`GraphQL Errors in inventory update: ${JSON.stringify(inventoryResponse.data.errors)}`);
+            }
+
+            if (!inventoryResponse.data.data) {
+                throw new Error(`No data field in inventory response for variant ${variant.id}. Response: ${JSON.stringify(inventoryResponse.data)}`);
+            }
+
+            const inventoryResult = inventoryResponse.data.data.inventorySetOnHandQuantities;
+            if (!inventoryResult) {
+                throw new Error(`No inventorySetOnHandQuantities in response for variant ${variant.id}. Available fields: ${Object.keys(inventoryResponse.data.data).join(', ')}`);
+            }
+
+            if (inventoryResult.userErrors && inventoryResult.userErrors.length > 0) {
+                throw new Error(`Inventory update errors: ${JSON.stringify(inventoryResult.userErrors)}`);
             }
 
             Logger.info(`Updated inventory for SKU ${variant.sku}: ${variant.currentInventory} -> ${newInventory}`);
