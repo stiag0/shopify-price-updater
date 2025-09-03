@@ -39,7 +39,6 @@ Required variables:
 
 // --- Constants ---
 const GRAPHQL_URL = `https://${SHOPIFY_SHOP_NAME}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
-const MAX_PAGES = 20; // Maximum number of pages to fetch
 const RETRY_DELAY = 1000; // 1 second
 const SAFETY_STOCK_UNITS = parseInt(SAFETY_STOCK, 10); // Convert to integer
 
@@ -335,12 +334,17 @@ async function getAllShopifyVariants() {
         let hasNextPage = true;
         let cursor = null;
         let totalFetched = 0;
+        let pageCount = 0;
+        const MAX_PAGES_LIMIT = 100; // Increased safety limit to handle large stores
 
-        while (hasNextPage) {
+        while (hasNextPage && pageCount < MAX_PAGES_LIMIT) {
+            pageCount++;
             const variables = { limit: 250 };
             if (cursor) {
                 variables.cursor = cursor;
             }
+
+            Logger.info(`Fetching page ${pageCount}${cursor ? ` (cursor: ${cursor.substring(0, 20)}...)` : ''}...`);
 
             await shopifyLimiter.removeTokens(1);
             const response = await fetchWithRetry(() => 
@@ -366,6 +370,12 @@ async function getAllShopifyVariants() {
             // Process this batch of variants
             const productVariants = response.data.data.productVariants?.edges || [];
             
+            // Safety check for empty response
+            if (productVariants.length === 0 && pageCount === 1) {
+                Logger.warn('No variants found in first page - this might indicate an API issue');
+                break;
+            }
+
             productVariants.forEach(edge => {
                 const node = edge.node;
                 if (node.sku) {
@@ -399,12 +409,23 @@ async function getAllShopifyVariants() {
             });
 
             totalFetched += productVariants.length;
-            Logger.info(`Fetched batch: ${productVariants.length} variants (Total: ${totalFetched})`);
+            Logger.info(`Fetched batch: ${productVariants.length} variants (Total: ${totalFetched}) - Page ${pageCount}`);
 
             // Check if there are more pages
             const pageInfo = response.data.data.productVariants?.pageInfo;
             hasNextPage = pageInfo?.hasNextPage || false;
             cursor = pageInfo?.endCursor || null;
+
+            // Additional safety check
+            if (hasNextPage && !cursor) {
+                Logger.warn('API indicates more pages but no cursor provided - stopping pagination');
+                hasNextPage = false;
+            }
+        }
+
+        // Log if we hit the page limit
+        if (pageCount >= MAX_PAGES_LIMIT) {
+            Logger.warn(`Reached maximum page limit (${MAX_PAGES_LIMIT}) for fetching Shopify variants. Some products may not be processed.`);
         }
 
         Logger.info(`Successfully fetched ${totalFetched} total variants from Shopify`);
