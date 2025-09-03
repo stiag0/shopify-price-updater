@@ -448,9 +448,9 @@ async function getAllShopifyVariants() {
 
 async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId) {
     const mutation = `
-        mutation productVariantUpdate($input: ProductVariantInput!) {
-            productVariantUpdate(input: $input) {
-                productVariant {
+        mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+            productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                productVariants {
                     id
                     price
                     compareAtPrice
@@ -464,11 +464,12 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
     `;
 
     const variables = {
-        input: {
+        productId: variant.product.id,
+        variants: [{
             id: variant.id,
             price: newPrice.toString(),
             compareAtPrice: compareAtPrice ? compareAtPrice.toString() : null
-        }
+        }]
     };
 
     try {
@@ -494,9 +495,9 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
             throw new Error(`No data field in response for variant ${variant.id}. Response: ${JSON.stringify(response.data)}`);
         }
 
-        const result = response.data.data.productVariantUpdate;
+        const result = response.data.data.productVariantsBulkUpdate;
         if (!result) {
-            throw new Error(`No productVariantUpdate in response for variant ${variant.id}. Available fields: ${Object.keys(response.data.data).join(', ')}`);
+            throw new Error(`No productVariantsBulkUpdate in response for variant ${variant.id}. Available fields: ${Object.keys(response.data.data).join(', ')}`);
         }
 
         if (result.userErrors && result.userErrors.length > 0) {
