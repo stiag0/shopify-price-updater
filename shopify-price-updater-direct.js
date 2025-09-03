@@ -448,7 +448,7 @@ async function getAllShopifyVariants() {
 
 async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId) {
     const mutation = `
-        mutation variantUpdate($input: ProductVariantInput!) {
+        mutation productVariantUpdate($input: ProductVariantInput!) {
             productVariantUpdate(input: $input) {
                 productVariant {
                     id
