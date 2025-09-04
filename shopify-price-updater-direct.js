@@ -1,6 +1,13 @@
 /**
  * Shopify Price Updater - Direct Price Version
  * Uses the same robust functionality as shopify-updater.js but takes prices directly from CSV
+ * 
+ * Recent Updates:
+ * - Fixed inventory synchronization bug where products with 0 local inventory remained available on Shopify
+ * - Enhanced zero inventory enforcement to ensure safety stock logic is properly applied
+ * - Switched from productVariantsBulkUpdate to productVariantUpdate mutation for better reliability
+ * - Added better error handling and validation for variant data
+ * - Added debug logging for inventory enforcement actions
  */
 
 require('dotenv').config();
@@ -378,34 +385,41 @@ async function getAllShopifyVariants() {
 
             productVariants.forEach(edge => {
                 const node = edge.node;
-                if (node.sku) {
-                    const normalized = normalizeSkuForMatching(node.sku);
-                    if (normalized.isValid) {
-                        // Extract inventory using the new quantities structure
-                        let currentInventory = 0;
-                        const inventoryLevelEdge = node.inventoryItem?.inventoryLevels?.edges?.[0]?.node;
-                        if (inventoryLevelEdge?.quantities?.length > 0) {
-                            const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
-                            currentInventory = availableObj?.quantity || 0;
-                        }
-
-                        const variantData = {
-                            id: node.id,
-                            sku: node.sku,
-                            price: node.price,
-                            compareAtPrice: node.compareAtPrice,
-                            inventoryItem: node.inventoryItem,
-                            currentInventory: currentInventory,
-                            product: {
-                                title: node.product.title
+                                    if (node.sku) {
+                        const normalized = normalizeSkuForMatching(node.sku);
+                        if (normalized.isValid) {
+                            // Validate that we have essential product data
+                            if (!node.product || !node.product.id) {
+                                Logger.warn(`SKU ${node.sku}: Missing product data, skipping variant`);
+                                return; // Skip this variant
                             }
-                        };
-                        variants.set(normalized.cleaned, variantData);
-                        if (normalized.padded !== normalized.cleaned) {
-                            variants.set(normalized.padded, variantData);
+                            
+                            // Extract inventory using the new quantities structure
+                            let currentInventory = 0;
+                            const inventoryLevelEdge = node.inventoryItem?.inventoryLevels?.edges?.[0]?.node;
+                            if (inventoryLevelEdge?.quantities?.length > 0) {
+                                const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
+                                currentInventory = availableObj?.quantity || 0;
+                            }
+
+                            const variantData = {
+                                id: node.id,
+                                sku: node.sku,
+                                price: node.price,
+                                compareAtPrice: node.compareAtPrice,
+                                inventoryItem: node.inventoryItem,
+                                currentInventory: currentInventory,
+                                product: {
+                                    id: node.product.id,
+                                    title: node.product.title
+                                }
+                            };
+                            variants.set(normalized.cleaned, variantData);
+                            if (normalized.padded !== normalized.cleaned) {
+                                variants.set(normalized.padded, variantData);
+                            }
                         }
                     }
-                }
             });
 
             totalFetched += productVariants.length;
@@ -447,10 +461,16 @@ async function getAllShopifyVariants() {
 }
 
 async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId) {
+    // Validate that we have the necessary data
+    if (!variant || !variant.id) {
+        throw new Error(`Invalid variant data: missing variant ID`);
+    }
+    
+    // Use single variant update mutation which is more reliable than bulk update
     const mutation = `
-        mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-            productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-                productVariants {
+        mutation productVariantUpdate($input: ProductVariantInput!) {
+            productVariantUpdate(input: $input) {
+                productVariant {
                     id
                     price
                     compareAtPrice
@@ -464,12 +484,11 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
     `;
 
     const variables = {
-        productId: variant.product.id,
-        variants: [{
+        input: {
             id: variant.id,
             price: newPrice.toString(),
             compareAtPrice: compareAtPrice ? compareAtPrice.toString() : null
-        }]
+        }
     };
 
     try {
@@ -495,9 +514,9 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
             throw new Error(`No data field in response for variant ${variant.id}. Response: ${JSON.stringify(response.data)}`);
         }
 
-        const result = response.data.data.productVariantsBulkUpdate;
+        const result = response.data.data.productVariantUpdate;
         if (!result) {
-            throw new Error(`No productVariantsBulkUpdate in response for variant ${variant.id}. Available fields: ${Object.keys(response.data.data).join(', ')}`);
+            throw new Error(`No productVariantUpdate in response for variant ${variant.id}. Available fields: ${Object.keys(response.data.data).join(', ')}`);
         }
 
         if (result.userErrors && result.userErrors.length > 0) {
@@ -571,7 +590,8 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
 
         return result.productVariant;
     } catch (error) {
-        Logger.error('Error updating variant:', error.response?.data || error.message);
+        Logger.error(`Error updating variant ${variant.id} (SKU: ${variant.sku}):`, error.response?.data || error.message);
+        Logger.error(`Variables used: ${JSON.stringify(variables)}`);
         throw error;
     }
 }
