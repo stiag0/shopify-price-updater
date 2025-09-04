@@ -1080,7 +1080,16 @@ async function updatePrices() {
 
                 // Skip if no changes needed
                 const priceNeedsUpdate = currentPrice !== newPrice || parseFloat(variant.compareAtPrice || 0) !== compareAtPrice;
-                const inventoryNeedsUpdate = newInventory !== null && newInventory !== variant.currentInventory;
+                // Force inventory update if local inventory is 0 (safety stock logic) to ensure products are unavailable
+                const inventoryNeedsUpdate = newInventory !== null && (
+                    newInventory !== variant.currentInventory || 
+                    (newInventory === 0 && variant.currentInventory !== 0)
+                );
+                
+                // Log zero inventory enforcement for debugging
+                if (newInventory === 0 && variant.currentInventory !== 0) {
+                    Logger.info(`SKU ${sku}: Forcing zero inventory update (Local: 0, Shopify: ${variant.currentInventory}) - Safety stock enforcement`);
+                }
 
                 if (!priceNeedsUpdate && !inventoryNeedsUpdate) {
                     Logger.info(`SKU ${sku} (${variant.product.title}): No updates needed (Discount Product)`);
@@ -1141,7 +1150,16 @@ async function updatePrices() {
 
                 // Skip if no changes needed
                 const priceNeedsUpdate = currentPrice !== newPrice || variant.compareAtPrice !== null;
-                const inventoryNeedsUpdate = newInventory !== null && newInventory !== variant.currentInventory;
+                // Force inventory update if local inventory is 0 (safety stock logic) to ensure products are unavailable
+                const inventoryNeedsUpdate = newInventory !== null && (
+                    newInventory !== variant.currentInventory || 
+                    (newInventory === 0 && variant.currentInventory !== 0)
+                );
+                
+                // Log zero inventory enforcement for debugging
+                if (newInventory === 0 && variant.currentInventory !== 0) {
+                    Logger.info(`SKU ${sku}: Forcing zero inventory update (Local: 0, Shopify: ${variant.currentInventory}) - Safety stock enforcement`);
+                }
 
                 if (!priceNeedsUpdate && !inventoryNeedsUpdate) {
                     Logger.info(`SKU ${sku} (${variant.product.title}): No updates needed (Regular Product)`);
