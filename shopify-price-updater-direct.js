@@ -466,39 +466,23 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
         throw new Error(`Invalid variant data: missing variant ID`);
     }
     
-    // Use single variant update mutation which is more reliable than bulk update
-    const mutation = `
-        mutation ($input: ProductVariantInput!) {
-            productVariantUpdate(input: $input) {
-                productVariant {
-                    id
-                    price
-                    compareAtPrice
-                }
-                userErrors {
-                    field
-                    message
-                }
-            }
-        }
-    `;
-
-    const variables = {
-        input: {
-            id: variant.id,
+    // Extract numeric ID from GraphQL GID
+    const variantNumericId = variant.id.split('/').pop();
+    
+    // Use REST API for variant updates (more reliable than GraphQL for older API versions)
+    const updateData = {
+        variant: {
+            id: variantNumericId,
             price: newPrice.toString(),
-            compareAtPrice: compareAtPrice ? compareAtPrice.toString() : null
+            compare_at_price: compareAtPrice ? compareAtPrice.toString() : null
         }
     };
 
     try {
-        // Update price
+        // Update price using REST API
         await shopifyLimiter.removeTokens(1);
         const response = await fetchWithRetry(() =>
-            shopifyClient.post('/graphql.json', {
-                query: mutation,
-                variables
-            })
+            shopifyClient.put(`/variants/${variantNumericId}.json`, updateData)
         );
 
         // Enhanced error handling
@@ -507,20 +491,7 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
         }
 
         if (response.data.errors) {
-            throw new Error(`GraphQL Errors: ${JSON.stringify(response.data.errors)}`);
-        }
-
-        if (!response.data.data) {
-            throw new Error(`No data field in response for variant ${variant.id}. Response: ${JSON.stringify(response.data)}`);
-        }
-
-        const result = response.data.data.productVariantUpdate;
-        if (!result) {
-            throw new Error(`No productVariantUpdate in response for variant ${variant.id}. Available fields: ${Object.keys(response.data.data).join(', ')}`);
-        }
-
-        if (result.userErrors && result.userErrors.length > 0) {
-            throw new Error(JSON.stringify(result.userErrors));
+            throw new Error(`REST API Errors: ${JSON.stringify(response.data.errors)}`);
         }
 
         // Update inventory if needed and tracked
@@ -531,37 +502,21 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
             variant.inventoryItem && 
             variant.inventoryItem.tracked) {
             
-            const inventoryMutation = `
-                mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
-                    inventorySetOnHandQuantities(input: $input) {
-                        inventoryAdjustmentGroup {
-                            id
-                        }
-                        userErrors {
-                            field
-                            code
-                            message
-                        }
-                    }
-                }
-            `;
-
-            const inventoryVariables = {
-                input: {
-                    reason: "correction",
-                    setQuantities: [{
-                        inventoryItemId: variant.inventoryItem.id,
-                        locationId: locationId,
-                        quantity: newInventory
-                    }]
-                }
+            // Extract numeric inventory item ID
+            const inventoryItemNumericId = variant.inventoryItem.id.split('/').pop();
+            const locationNumericId = locationId.split('/').pop();
+            
+            // Use REST API for inventory updates
+            const inventoryUpdateData = {
+                location_id: locationNumericId,
+                inventory_item_id: inventoryItemNumericId,
+                available: newInventory
             };
 
             await shopifyLimiter.removeTokens(1);
-            const inventoryResponse = await shopifyClient.post('/graphql.json', {
-                query: inventoryMutation,
-                variables: inventoryVariables
-            });
+            const inventoryResponse = await fetchWithRetry(() =>
+                shopifyClient.post('/inventory_levels/set.json', inventoryUpdateData)
+            );
 
             // Enhanced error handling for inventory update
             if (!inventoryResponse.data) {
@@ -569,29 +524,16 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
             }
 
             if (inventoryResponse.data.errors) {
-                throw new Error(`GraphQL Errors in inventory update: ${JSON.stringify(inventoryResponse.data.errors)}`);
-            }
-
-            if (!inventoryResponse.data.data) {
-                throw new Error(`No data field in inventory response for variant ${variant.id}. Response: ${JSON.stringify(inventoryResponse.data)}`);
-            }
-
-            const inventoryResult = inventoryResponse.data.data.inventorySetOnHandQuantities;
-            if (!inventoryResult) {
-                throw new Error(`No inventorySetOnHandQuantities in response for variant ${variant.id}. Available fields: ${Object.keys(inventoryResponse.data.data).join(', ')}`);
-            }
-
-            if (inventoryResult.userErrors && inventoryResult.userErrors.length > 0) {
-                throw new Error(`Inventory update errors: ${JSON.stringify(inventoryResult.userErrors)}`);
+                throw new Error(`REST API Errors in inventory update: ${JSON.stringify(inventoryResponse.data.errors)}`);
             }
 
             Logger.info(`Updated inventory for SKU ${variant.sku}: ${variant.currentInventory} -> ${newInventory}`);
         }
 
-        return result.productVariant;
+        return response.data.variant;
     } catch (error) {
         Logger.error(`Error updating variant ${variant.id} (SKU: ${variant.sku}):`, error.response?.data || error.message);
-        Logger.error(`Variables used: ${JSON.stringify(variables)}`);
+        Logger.error(`Update data used: ${JSON.stringify(updateData)}`);
         throw error;
     }
 }
