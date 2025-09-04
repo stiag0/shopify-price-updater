@@ -468,7 +468,7 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
     
     // Use single variant update mutation which is more reliable than bulk update
     const mutation = `
-        mutation productVariantUpdate($input: ProductVariantInput!) {
+        mutation ($input: ProductVariantInput!) {
             productVariantUpdate(input: $input) {
                 productVariant {
                     id
