@@ -770,7 +770,26 @@ async function getLocalInventory() {
             }
         });
 
-        const inventoryData = response.data.value;
+        // FIX: Validate response structure before accessing data
+        if (!response || !response.data) {
+            Logger.warn(`Inventory API returned invalid response structure. Response: ${JSON.stringify(response)}`);
+            Logger.warn(`Returning empty inventory map. This may happen at the start of a new month when inventory data is not yet available.`);
+            return new Map();
+        }
+
+        // FIX: Handle cases where value might be undefined, null, or missing
+        const inventoryData = response.data?.value ?? [];
+        
+        // Validate that we have an array
+        if (!Array.isArray(inventoryData)) {
+            Logger.warn(`Inventory API returned non-array data. Response structure: ${JSON.stringify(response.data)}`);
+            Logger.warn(`This may happen at the start of a new month when inventory data is not yet available.`);
+            Logger.warn(`Returning empty inventory map as fallback.`);
+            return new Map(); // Return empty map if data structure is invalid
+        }
+        
+        Logger.info(`Received ${inventoryData.length} inventory records from API`);
+        
         const inventoryMap = new Map();
         let processedCount = 0;
         let invalidCount = 0;
@@ -893,7 +912,39 @@ async function getLocalInventory() {
         
         return inventoryMap;
     } catch (error) {
+        // FIX: Enhanced error logging for better debugging
         Logger.error('Error fetching inventory:', error.message);
+        
+        // Log response details if available
+        if (error.response) {
+            Logger.error(`API Response Status: ${error.response.status}`);
+            Logger.error(`API Response Headers: ${JSON.stringify(error.response.headers)}`);
+            Logger.error(`API Response Data: ${JSON.stringify(error.response.data)}`);
+        }
+        
+        // Log request details if available
+        if (error.config) {
+            Logger.error(`Failed Request URL: ${error.config.url || INVENTORY_API_URL}`);
+            Logger.error(`Request Method: ${error.config.method || 'GET'}`);
+        }
+        
+        // Log network/connection errors
+        if (error.code) {
+            Logger.error(`Error Code: ${error.code}`);
+            if (error.code === 'ECONNREFUSED') {
+                Logger.error('Connection refused - is the API server running?');
+            } else if (error.code === 'ETIMEDOUT') {
+                Logger.error('Connection timed out - the API server may be slow or unreachable');
+            }
+        }
+        
+        // Log stack trace for debugging
+        if (error.stack) {
+            Logger.error(`Stack trace: ${error.stack}`);
+        }
+        
+        Logger.error('Note: This error may occur at the start of a new month when inventory data is not yet available in the InventarioMensual endpoint.');
+        
         throw error;
     }
 }
