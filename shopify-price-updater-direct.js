@@ -758,8 +758,19 @@ async function getLocalInventory() {
         const response = await fetchWithRetry(async () => {
             try {
                 const result = await localApiClient.get(INVENTORY_API_URL);
+                Logger.info(`Inventory API response received. Status: ${result?.status || 'N/A'}, Has data: ${!!result?.data}`);
+                if (result?.data) {
+                    Logger.info(`Response data keys: ${Object.keys(result.data).join(', ')}`);
+                    Logger.info(`Response.data.value type: ${Array.isArray(result.data.value) ? 'Array' : typeof result.data.value}`);
+                    if (result.data.value) {
+                        Logger.info(`Response.data.value length: ${Array.isArray(result.data.value) ? result.data.value.length : 'N/A (not an array)'}`);
+                    } else {
+                        Logger.warn(`Response.data.value is ${result.data.value === null ? 'null' : 'undefined'}`);
+                    }
+                }
                 return result;
             } catch (err) {
+                Logger.error(`Error in fetchWithRetry for inventory: ${err?.message || err?.toString() || String(err)}`);
                 if (err.code === 'ECONNREFUSED') {
                     throw new Error(`Connection refused to local API at ${INVENTORY_API_URL}. Is the API server running?`);
                 }
@@ -913,23 +924,67 @@ async function getLocalInventory() {
         return inventoryMap;
     } catch (error) {
         // FIX: Enhanced error logging for better debugging
-        Logger.error('Error fetching inventory:', error.message);
+        // Handle cases where error.message might be undefined
+        let errorMessage = 'Unknown error';
+        if (error) {
+            if (error.message) {
+                errorMessage = error.message;
+            } else if (typeof error.toString === 'function') {
+                errorMessage = error.toString();
+            } else {
+                errorMessage = String(error);
+            }
+        }
+        Logger.error(`Error fetching inventory: ${errorMessage}`);
+        
+        // Always log full error details for debugging
+        Logger.error(`Error object exists: ${!!error}, Error type: ${error?.constructor?.name || typeof error}`);
+        
+        // Log the full error object details
+        if (error) {
+            try {
+                // Try to serialize error with all properties
+                const errorDetails = {
+                    name: error?.name,
+                    message: error?.message,
+                    stack: error?.stack,
+                    code: error?.code,
+                    response: error?.response ? {
+                        status: error.response.status,
+                        statusText: error.response.statusText,
+                        data: error.response.data
+                    } : undefined,
+                    config: error?.config ? {
+                        url: error.config.url,
+                        method: error.config.method
+                    } : undefined,
+                    toString: error?.toString?.(),
+                    // Include all enumerable properties
+                    ...Object.fromEntries(Object.entries(error || {}))
+                };
+                Logger.error('Full error object:', JSON.stringify(errorDetails, null, 2));
+            } catch (serializeError) {
+                Logger.error('Error object (raw):', String(error));
+                Logger.error('Error object type:', typeof error);
+                Logger.error('Error object constructor:', error?.constructor?.name);
+            }
+        }
         
         // Log response details if available
-        if (error.response) {
+        if (error?.response) {
             Logger.error(`API Response Status: ${error.response.status}`);
             Logger.error(`API Response Headers: ${JSON.stringify(error.response.headers)}`);
             Logger.error(`API Response Data: ${JSON.stringify(error.response.data)}`);
         }
         
         // Log request details if available
-        if (error.config) {
+        if (error?.config) {
             Logger.error(`Failed Request URL: ${error.config.url || INVENTORY_API_URL}`);
             Logger.error(`Request Method: ${error.config.method || 'GET'}`);
         }
         
         // Log network/connection errors
-        if (error.code) {
+        if (error?.code) {
             Logger.error(`Error Code: ${error.code}`);
             if (error.code === 'ECONNREFUSED') {
                 Logger.error('Connection refused - is the API server running?');
@@ -938,8 +993,12 @@ async function getLocalInventory() {
             }
         }
         
+        // Log all error properties for debugging
+        Logger.error(`Error type: ${error?.constructor?.name || typeof error}`);
+        Logger.error(`Error keys: ${Object.keys(error || {}).join(', ')}`);
+        
         // Log stack trace for debugging
-        if (error.stack) {
+        if (error?.stack) {
             Logger.error(`Stack trace: ${error.stack}`);
         }
         
