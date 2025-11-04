@@ -205,7 +205,16 @@ const shopifyLimiter = new RateLimiter({
 
 // Create a separate axios instance for local API with timeout
 const localApiClient = axios.create({
-    timeout: 5000, // 5 seconds timeout
+    timeout: 5000, // 5 seconds timeout for general API calls
+    headers: {
+        'Accept': 'application/json'
+    }
+});
+
+// Create a separate axios instance for inventory API with longer timeout
+// Inventory API can be slow, especially at the start of a new month
+const inventoryApiClient = axios.create({
+    timeout: 60000, // 60 seconds timeout for inventory API
     headers: {
         'Accept': 'application/json'
     }
@@ -757,7 +766,8 @@ async function getLocalInventory() {
         Logger.info(`Fetching inventory from ${INVENTORY_API_URL}`);
         const response = await fetchWithRetry(async () => {
             try {
-                const result = await localApiClient.get(INVENTORY_API_URL);
+                // Use inventoryApiClient with longer timeout for inventory calls
+                const result = await inventoryApiClient.get(INVENTORY_API_URL);
                 Logger.info(`Inventory API response received. Status: ${result?.status || 'N/A'}, Has data: ${!!result?.data}`);
                 if (result?.data) {
                     Logger.info(`Response data keys: ${Object.keys(result.data).join(', ')}`);
@@ -770,13 +780,24 @@ async function getLocalInventory() {
                 }
                 return result;
             } catch (err) {
-                Logger.error(`Error in fetchWithRetry for inventory: ${err?.message || err?.toString() || String(err)}`);
+                const errorMsg = err?.message || err?.toString() || String(err);
+                Logger.error(`Error in fetchWithRetry for inventory: ${errorMsg}`);
+                
                 if (err.code === 'ECONNREFUSED') {
                     throw new Error(`Connection refused to local API at ${INVENTORY_API_URL}. Is the API server running?`);
                 }
+                
+                // Handle timeout errors with more context
+                if (err.code === 'ECONNABORTED' || errorMsg.includes('timeout')) {
+                    Logger.warn(`Inventory API timeout - This may happen at the start of a new month when the API is processing monthly inventory data.`);
+                    Logger.warn(`Consider checking if the InventarioMensual endpoint is available and responding.`);
+                    throw new Error(`Inventory API request timed out after 60 seconds. The API may be slow or processing data for the new month. URL: ${INVENTORY_API_URL}`);
+                }
+                
                 if (err.code === 'ETIMEDOUT') {
                     throw new Error(`Connection timed out while trying to reach ${INVENTORY_API_URL}`);
                 }
+                
                 throw err;
             }
         });
