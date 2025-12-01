@@ -74,32 +74,32 @@ const Timer = {
 const Logger = {
     logFile: null,
     logPath: path.join(__dirname, 'logs', `shopify-sync-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.log`),
-    
+
     init() {
         // Create logs directory if it doesn't exist
         const logDir = path.dirname(this.logPath);
         if (!fs.existsSync(logDir)) {
             fs.mkdirSync(logDir, { recursive: true });
         }
-        
+
         // Create log file
         this.logFile = fs.createWriteStream(this.logPath, { flags: 'a' });
         this.info(`Log file created: ${this.logPath}`);
     },
-    
+
     log(message, level = 'INFO') {
         const timestamp = new Date().toISOString();
         const logMessage = `[${timestamp}] [${level}] ${message}`;
-        
+
         // Log to console
         console.log(logMessage);
-        
+
         // Log to file if available
         if (this.logFile) {
             this.logFile.write(logMessage + '\n');
         }
     },
-    
+
     info(message) { this.log(message, 'INFO'); },
     warn(message) { this.log(message, 'WARN'); },
     error(message) { this.log(message, 'ERROR'); },
@@ -111,7 +111,7 @@ const Logger = {
             this.logFile.write(sectionLine + '\n');
         }
     },
-    
+
     async close() {
         return new Promise((resolve) => {
             if (this.logFile) {
@@ -138,36 +138,36 @@ async function gracefulShutdown(signal) {
         console.log('\nForce shutdown initiated...');
         process.exit(1);
     }
-    
+
     isShuttingDown = true;
     console.log(`\n\nReceived ${signal}. Initiating graceful shutdown...`);
     Logger.warn(`Shutdown signal received: ${signal}`);
-    
+
     try {
         // If we're in the middle of an operation, log it
         if (currentOperation) {
             Logger.warn(`Interrupting current operation: ${currentOperation}`);
         }
-        
+
         // Log shutdown summary
         const endTime = Timer.endTimer();
         if (endTime) {
             Logger.info(`Script execution time before shutdown: ${endTime}`);
         }
-        
+
         Logger.info('Performing cleanup operations...');
-        
+
         // Give any pending operations a moment to complete
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
+
         Logger.info('Graceful shutdown completed');
-        
+
         // Close log file
         await Logger.close();
-        
+
         console.log('Cleanup completed. Exiting...');
         process.exit(0);
-        
+
     } catch (error) {
         console.error('Error during graceful shutdown:', error.message);
         await Logger.close();
@@ -245,19 +245,19 @@ function normalizeSkuForMatching(sku) {
     if (/^\d+$/.test(cleaned)) {
         const unpadded = cleaned.replace(/^0+/, '');
         const padded = unpadded.padStart(5, '0');
-        return { 
-            isValid: true, 
+        return {
+            isValid: true,
             cleaned: unpadded,
             padded,
             original: cleaned
         };
     }
 
-    return { 
-        isValid: true, 
-        cleaned: cleaned, 
+    return {
+        isValid: true,
+        cleaned: cleaned,
         padded: cleaned,
-        original: cleaned 
+        original: cleaned
     };
 }
 
@@ -280,7 +280,7 @@ async function fetchWithRetry(operation, retries = parseInt(MAX_RETRIES, 10)) {
 // --- Shopify API Functions ---
 async function getAllShopifyVariants() {
     Logger.info("Fetching all product variants from Shopify...");
-    
+
     const query = `
         query GetVariants($limit: Int!, $cursor: String) {
             productVariants(first: $limit, after: $cursor) {
@@ -332,8 +332,8 @@ async function getAllShopifyVariants() {
     try {
         // Extract location ID first
         await shopifyLimiter.removeTokens(1);
-        const locationResponse = await fetchWithRetry(() => 
-            shopifyClient.post('/graphql.json', { 
+        const locationResponse = await fetchWithRetry(() =>
+            shopifyClient.post('/graphql.json', {
                 query: `query GetLocations { locations(first: 1) { edges { node { id name } } } }`
             })
         );
@@ -363,10 +363,10 @@ async function getAllShopifyVariants() {
             Logger.info(`Fetching page ${pageCount}${cursor ? ` (cursor: ${cursor.substring(0, 20)}...)` : ''}...`);
 
             await shopifyLimiter.removeTokens(1);
-            const response = await fetchWithRetry(() => 
-                shopifyClient.post('/graphql.json', { 
-                    query, 
-                    variables 
+            const response = await fetchWithRetry(() =>
+                shopifyClient.post('/graphql.json', {
+                    query,
+                    variables
                 })
             );
 
@@ -385,7 +385,7 @@ async function getAllShopifyVariants() {
 
             // Process this batch of variants
             const productVariants = response.data.data.productVariants?.edges || [];
-            
+
             // Safety check for empty response
             if (productVariants.length === 0 && pageCount === 1) {
                 Logger.warn('No variants found in first page - this might indicate an API issue');
@@ -394,41 +394,41 @@ async function getAllShopifyVariants() {
 
             productVariants.forEach(edge => {
                 const node = edge.node;
-                                    if (node.sku) {
-                        const normalized = normalizeSkuForMatching(node.sku);
-                        if (normalized.isValid) {
-                            // Validate that we have essential product data
-                            if (!node.product || !node.product.id) {
-                                Logger.warn(`SKU ${node.sku}: Missing product data, skipping variant`);
-                                return; // Skip this variant
-                            }
-                            
-                            // Extract inventory using the new quantities structure
-                            let currentInventory = 0;
-                            const inventoryLevelEdge = node.inventoryItem?.inventoryLevels?.edges?.[0]?.node;
-                            if (inventoryLevelEdge?.quantities?.length > 0) {
-                                const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
-                                currentInventory = availableObj?.quantity || 0;
-                            }
+                if (node.sku) {
+                    const normalized = normalizeSkuForMatching(node.sku);
+                    if (normalized.isValid) {
+                        // Validate that we have essential product data
+                        if (!node.product || !node.product.id) {
+                            Logger.warn(`SKU ${node.sku}: Missing product data, skipping variant`);
+                            return; // Skip this variant
+                        }
 
-                            const variantData = {
-                                id: node.id,
-                                sku: node.sku,
-                                price: node.price,
-                                compareAtPrice: node.compareAtPrice,
-                                inventoryItem: node.inventoryItem,
-                                currentInventory: currentInventory,
-                                product: {
-                                    id: node.product.id,
-                                    title: node.product.title
-                                }
-                            };
-                            variants.set(normalized.cleaned, variantData);
-                            if (normalized.padded !== normalized.cleaned) {
-                                variants.set(normalized.padded, variantData);
+                        // Extract inventory using the new quantities structure
+                        let currentInventory = 0;
+                        const inventoryLevelEdge = node.inventoryItem?.inventoryLevels?.edges?.[0]?.node;
+                        if (inventoryLevelEdge?.quantities?.length > 0) {
+                            const availableObj = inventoryLevelEdge.quantities.find(q => q.name === 'available');
+                            currentInventory = availableObj?.quantity || 0;
+                        }
+
+                        const variantData = {
+                            id: node.id,
+                            sku: node.sku,
+                            price: node.price,
+                            compareAtPrice: node.compareAtPrice,
+                            inventoryItem: node.inventoryItem,
+                            currentInventory: currentInventory,
+                            product: {
+                                id: node.product.id,
+                                title: node.product.title
                             }
+                        };
+                        variants.set(normalized.cleaned, variantData);
+                        if (normalized.padded !== normalized.cleaned) {
+                            variants.set(normalized.padded, variantData);
                         }
                     }
+                }
             });
 
             totalFetched += productVariants.length;
@@ -458,13 +458,13 @@ async function getAllShopifyVariants() {
         // Enhanced error logging
         Logger.error('Error fetching variants from Shopify:');
         Logger.error(`Error message: ${error.message}`);
-        
+
         if (error.response) {
             Logger.error(`HTTP Status: ${error.response.status}`);
             Logger.error(`Response headers: ${JSON.stringify(error.response.headers)}`);
             Logger.error(`Response data: ${JSON.stringify(error.response.data)}`);
         }
-        
+
         throw error;
     }
 }
@@ -474,10 +474,10 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
     if (!variant || !variant.id) {
         throw new Error(`Invalid variant data: missing variant ID`);
     }
-    
+
     // Extract numeric ID from GraphQL GID
     const variantNumericId = variant.id.split('/').pop();
-    
+
     // Use REST API for variant updates (more reliable than GraphQL for older API versions)
     const updateData = {
         variant: {
@@ -504,17 +504,17 @@ async function updateVariantPrice(variant, newPrice, compareAtPrice, newInventor
         }
 
         // Update inventory if needed and tracked
-        if (newInventory !== null && 
+        if (newInventory !== null &&
             newInventory !== undefined &&
             !isNaN(newInventory) &&
-            newInventory !== variant.currentInventory && 
-            variant.inventoryItem && 
+            newInventory !== variant.currentInventory &&
+            variant.inventoryItem &&
             variant.inventoryItem.tracked) {
-            
+
             // Extract numeric inventory item ID
             const inventoryItemNumericId = variant.inventoryItem.id.split('/').pop();
             const locationNumericId = locationId.split('/').pop();
-            
+
             // Use REST API for inventory updates
             const inventoryUpdateData = {
                 location_id: locationNumericId,
@@ -554,12 +554,12 @@ async function getOriginalPrices() {
         const response = await fetchWithRetry(async () => {
             try {
                 const result = await localApiClient.get(DATA_API_URL);
-                
+
                 // Debug the actual response structure
                 Logger.info('API Response received. Analyzing structure...');
                 Logger.info(`Response status: ${result.status}`);
                 Logger.info(`Content-Type: ${result.headers['content-type']}`);
-                
+
                 // Check if we got any data
                 if (!result.data) {
                     throw new Error('Empty response from API');
@@ -603,14 +603,14 @@ async function getOriginalPrices() {
                 if (products.length > 0) {
                     const firstProduct = products[0];
                     Logger.info('First product structure: ' + JSON.stringify(firstProduct));
-                    
+
                     if (!firstProduct.CodigoProducto) {
                         // Check if we need to map different field names
                         const possibleSkuFields = ['sku', 'codigo', 'code', 'id'];
-                        const foundSkuField = Object.keys(firstProduct).find(key => 
+                        const foundSkuField = Object.keys(firstProduct).find(key =>
                             possibleSkuFields.includes(key.toLowerCase())
                         );
-                        
+
                         if (foundSkuField) {
                             Logger.info(`Found alternative SKU field: ${foundSkuField}`);
                             // Remap the data structure
@@ -679,7 +679,7 @@ async function getOriginalPrices() {
                 if (normalized.padded !== normalized.cleaned) {
                     priceMap.set(normalized.padded, productData);
                 }
-                
+
                 skuFormats.add(`${product.CodigoProducto} -> ${normalized.cleaned} (padded: ${normalized.padded})`);
                 processedCount++;
             } else {
@@ -724,19 +724,23 @@ async function getDiscountPrices() {
             if (sku && price) {
                 const normalized = normalizeSkuForMatching(sku);
                 if (normalized.isValid) {
-                    const newPrice = parseFloat(price);
+                    // Fix: Remove dots (thousands separators) before parsing
+                    // Example: "22.270" -> "22270"
+                    const sanitizedPrice = price.replace(/\./g, '');
+                    const newPrice = parseFloat(sanitizedPrice);
+
                     if (!isNaN(newPrice)) {
                         const priceData = {
                             newPrice: newPrice,
                             rawSku: sku
                         };
-                        
+
                         // Store both padded and unpadded versions for numeric SKUs
                         priceMap.set(normalized.cleaned, priceData);
                         if (normalized.padded !== normalized.cleaned) {
                             priceMap.set(normalized.padded, priceData);
                         }
-                        
+
                         skuFormats.add(`${sku} -> ${normalized.cleaned} (padded: ${normalized.padded})`);
                         uniqueSkuCount++; // Increment for each unique SKU
                     }
@@ -782,22 +786,22 @@ async function getLocalInventory() {
             } catch (err) {
                 const errorMsg = err?.message || err?.toString() || String(err);
                 Logger.error(`Error in fetchWithRetry for inventory: ${errorMsg}`);
-                
+
                 if (err.code === 'ECONNREFUSED') {
                     throw new Error(`Connection refused to local API at ${INVENTORY_API_URL}. Is the API server running?`);
                 }
-                
+
                 // Handle timeout errors with more context
                 if (err.code === 'ECONNABORTED' || errorMsg.includes('timeout')) {
                     Logger.warn(`Inventory API timeout - This may happen at the start of a new month when the API is processing monthly inventory data.`);
                     Logger.warn(`Consider checking if the InventarioMensual endpoint is available and responding.`);
                     throw new Error(`Inventory API request timed out after 60 seconds. The API may be slow or processing data for the new month. URL: ${INVENTORY_API_URL}`);
                 }
-                
+
                 if (err.code === 'ETIMEDOUT') {
                     throw new Error(`Connection timed out while trying to reach ${INVENTORY_API_URL}`);
                 }
-                
+
                 throw err;
             }
         });
@@ -811,7 +815,7 @@ async function getLocalInventory() {
 
         // FIX: Handle cases where value might be undefined, null, or missing
         const inventoryData = response.data?.value ?? [];
-        
+
         // Validate that we have an array
         if (!Array.isArray(inventoryData)) {
             Logger.warn(`Inventory API returned non-array data. Response structure: ${JSON.stringify(response.data)}`);
@@ -819,9 +823,9 @@ async function getLocalInventory() {
             Logger.warn(`Returning empty inventory map as fallback.`);
             return new Map(); // Return empty map if data structure is invalid
         }
-        
+
         Logger.info(`Received ${inventoryData.length} inventory records from API`);
-        
+
         const inventoryMap = new Map();
         let processedCount = 0;
         let invalidCount = 0;
@@ -829,7 +833,7 @@ async function getLocalInventory() {
 
         // First pass: Find the latest timestamp for each SKU
         const latestRecords = new Map(); // SKU -> { item, timestamp, normalized }
-        
+
         for (const item of inventoryData) {
             if (!item.CodigoProducto) {
                 invalidCount++;
@@ -853,10 +857,10 @@ async function getLocalInventory() {
             } else {
                 // Fallback to other timestamp fields if Fecha is not available
                 const possibleTimestampFields = [
-                    'FechaCreacion', 'FechaModificacion', 'Timestamp', 
+                    'FechaCreacion', 'FechaModificacion', 'Timestamp',
                     'CreatedAt', 'UpdatedAt', 'Date', 'Time', 'FechaHora'
                 ];
-                
+
                 for (const field of possibleTimestampFields) {
                     if (item[field]) {
                         timestamp = new Date(item[field]);
@@ -874,7 +878,7 @@ async function getLocalInventory() {
             }
 
             const skuKey = normalized.cleaned;
-            
+
             // Check if this is the latest record for this SKU
             if (!latestRecords.has(skuKey) || timestamp > latestRecords.get(skuKey).timestamp) {
                 latestRecords.set(skuKey, {
@@ -902,7 +906,7 @@ async function getLocalInventory() {
             }
 
             const calculatedQuantity = Math.max(0, initial + received - shipped);
-            
+
             // Safety stock logic: If inventory is 5 or less, don't sell online (keep all for store)
             let shopifyQuantity;
             if (calculatedQuantity <= SAFETY_STOCK_UNITS) {
@@ -910,7 +914,7 @@ async function getLocalInventory() {
             } else {
                 shopifyQuantity = Math.floor(calculatedQuantity); // Sell full amount online (enough for store)
             }
-            
+
             const inventoryData = {
                 quantity: shopifyQuantity,
                 actualQuantity: Math.floor(calculatedQuantity), // Keep track of actual inventory
@@ -933,15 +937,15 @@ async function getLocalInventory() {
         }
 
         Logger.info(`Successfully processed ${processedCount} inventory items (${invalidCount} invalid entries skipped)`);
-        
+
         // Count how many SKUs had multiple records (for informational purposes)
         const totalRecords = inventoryData.length;
         const uniqueSkus = latestRecords.size;
         if (totalRecords > uniqueSkus) {
             duplicateSkus = totalRecords - uniqueSkus;
-            Logger.info(`Found ${duplicateSkus} duplicate records across ${uniqueSkus} unique SKUs (efficiency: ${((uniqueSkus/totalRecords)*100).toFixed(1)}%)`);
+            Logger.info(`Found ${duplicateSkus} duplicate records across ${uniqueSkus} unique SKUs (efficiency: ${((uniqueSkus / totalRecords) * 100).toFixed(1)}%)`);
         }
-        
+
         return inventoryMap;
     } catch (error) {
         // FIX: Enhanced error logging for better debugging
@@ -957,10 +961,10 @@ async function getLocalInventory() {
             }
         }
         Logger.error(`Error fetching inventory: ${errorMessage}`);
-        
+
         // Always log full error details for debugging
         Logger.error(`Error object exists: ${!!error}, Error type: ${error?.constructor?.name || typeof error}`);
-        
+
         // Log the full error object details
         if (error) {
             try {
@@ -990,20 +994,20 @@ async function getLocalInventory() {
                 Logger.error('Error object constructor:', error?.constructor?.name);
             }
         }
-        
+
         // Log response details if available
         if (error?.response) {
             Logger.error(`API Response Status: ${error.response.status}`);
             Logger.error(`API Response Headers: ${JSON.stringify(error.response.headers)}`);
             Logger.error(`API Response Data: ${JSON.stringify(error.response.data)}`);
         }
-        
+
         // Log request details if available
         if (error?.config) {
             Logger.error(`Failed Request URL: ${error.config.url || INVENTORY_API_URL}`);
             Logger.error(`Request Method: ${error.config.method || 'GET'}`);
         }
-        
+
         // Log network/connection errors
         if (error?.code) {
             Logger.error(`Error Code: ${error.code}`);
@@ -1013,18 +1017,18 @@ async function getLocalInventory() {
                 Logger.error('Connection timed out - the API server may be slow or unreachable');
             }
         }
-        
+
         // Log all error properties for debugging
         Logger.error(`Error type: ${error?.constructor?.name || typeof error}`);
         Logger.error(`Error keys: ${Object.keys(error || {}).join(', ')}`);
-        
+
         // Log stack trace for debugging
         if (error?.stack) {
             Logger.error(`Stack trace: ${error.stack}`);
         }
-        
+
         Logger.error('Note: This error may occur at the start of a new month when inventory data is not yet available in the InventarioMensual endpoint.');
-        
+
         throw error;
     }
 }
@@ -1074,45 +1078,45 @@ async function updatePrices() {
         for (const [sku, discountData] of discountPrices) {
             const exists = shopifyVariants.has(sku);
             const originalData = originalPrices.get(sku);
-            
-                            Logger.info(`  ${sku} -> Exists: ${exists}, Discount Price: ${discountData.newPrice}`);
-            
+
+            Logger.info(`  ${sku} -> Exists: ${exists}, Discount Price: ${discountData.newPrice}`);
+
             if (exists) {
                 const variant = shopifyVariants.get(sku);
                 const inventoryInfo = inventoryData.get(sku);
-                
+
                 Logger.info(`    Product: "${variant.product.title}"`);
                 Logger.info(`    Current Shopify Price: ${variant.price}`);
                 Logger.info(`    Current Shopify Compare-at: ${variant.compareAtPrice || 'null'}`);
                 Logger.info(`    Current Shopify Inventory: ${variant.currentInventory}`);
-                
+
                 if (inventoryInfo) {
-                    const reserveLogic = inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS ? 
-                        `all ${inventoryInfo.actualQuantity} units reserved for store` : 
+                    const reserveLogic = inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS ?
+                        `all ${inventoryInfo.actualQuantity} units reserved for store` :
                         `${inventoryInfo.actualQuantity} units available, selling all online`;
                     Logger.info(`    Actual Inventory: ${inventoryInfo.actualQuantity}, Shopify Inventory: ${inventoryInfo.quantity} (${reserveLogic})`);
                 }
-                
+
                 Logger.info(`    NEW Discount Price (from CSV): ${discountData.newPrice}`);
                 Logger.info(`    NEW Compare-at Price (from Local API): ${originalData?.originalPrice || 'N/A'}`);
-                
+
                 // Show if update is needed
                 const currentPrice = parseFloat(variant.price);
                 const newPrice = discountData.newPrice;
                 const compareAtPrice = originalData?.originalPrice;
                 const currentCompareAt = parseFloat(variant.compareAtPrice || 0);
-                
+
                 const priceNeedsUpdate = currentPrice !== newPrice || currentCompareAt !== compareAtPrice;
                 const inventoryNeedsUpdate = inventoryInfo && inventoryInfo.quantity !== variant.currentInventory;
-                
+
                 Logger.info(`    Update needed: ${priceNeedsUpdate || inventoryNeedsUpdate ? 'YES' : 'NO'}`);
-                
+
                 if (priceNeedsUpdate) {
                     Logger.info(`    Price Changes: ${currentPrice} -> ${newPrice}, Compare-at ${currentCompareAt} -> ${compareAtPrice}`);
                 }
                 if (inventoryNeedsUpdate) {
-                    const changeLogic = inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS ? 
-                        `reserving all ${inventoryInfo.actualQuantity} units for store` : 
+                    const changeLogic = inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS ?
+                        `reserving all ${inventoryInfo.actualQuantity} units for store` :
                         `selling all ${inventoryInfo.actualQuantity} units online`;
                     Logger.info(`    Inventory Changes: ${variant.currentInventory} -> ${inventoryInfo.quantity} (${changeLogic})`);
                 }
@@ -1175,10 +1179,10 @@ async function updatePrices() {
                 const priceNeedsUpdate = currentPrice !== newPrice || parseFloat(variant.compareAtPrice || 0) !== compareAtPrice;
                 // Force inventory update if local inventory is 0 (safety stock logic) to ensure products are unavailable
                 const inventoryNeedsUpdate = newInventory !== null && (
-                    newInventory !== variant.currentInventory || 
+                    newInventory !== variant.currentInventory ||
                     (newInventory === 0 && variant.currentInventory !== 0)
                 );
-                
+
                 // Log zero inventory enforcement for debugging
                 if (newInventory === 0 && variant.currentInventory !== 0) {
                     Logger.info(`SKU ${sku}: Forcing zero inventory update (Local: 0, Shopify: ${variant.currentInventory}) - Safety stock enforcement`);
@@ -1193,16 +1197,16 @@ async function updatePrices() {
 
                 // Update variant
                 await updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId);
-                
+
                 Logger.info(`SKU ${sku} (${variant.product.title}): Updated successfully`);
-                
+
                 if (priceNeedsUpdate) {
                     stats.priceUpdates++;
                     stats.discountProducts++;
                 }
                 if (inventoryNeedsUpdate) stats.inventoryUpdates++;
                 stats.updated++;
-                
+
                 // Mark this variant as processed
                 processedVariants.add(variant.id);
 
@@ -1245,10 +1249,10 @@ async function updatePrices() {
                 const priceNeedsUpdate = currentPrice !== newPrice || variant.compareAtPrice !== null;
                 // Force inventory update if local inventory is 0 (safety stock logic) to ensure products are unavailable
                 const inventoryNeedsUpdate = newInventory !== null && (
-                    newInventory !== variant.currentInventory || 
+                    newInventory !== variant.currentInventory ||
                     (newInventory === 0 && variant.currentInventory !== 0)
                 );
-                
+
                 // Log zero inventory enforcement for debugging
                 if (newInventory === 0 && variant.currentInventory !== 0) {
                     Logger.info(`SKU ${sku}: Forcing zero inventory update (Local: 0, Shopify: ${variant.currentInventory}) - Safety stock enforcement`);
@@ -1263,16 +1267,16 @@ async function updatePrices() {
 
                 // Update variant
                 await updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId);
-                
+
                 Logger.info(`SKU ${sku} (${variant.product.title}): Updated successfully`);
-                
+
                 if (priceNeedsUpdate) {
                     stats.priceUpdates++;
                     stats.regularProducts++;
                 }
                 if (inventoryNeedsUpdate) stats.inventoryUpdates++;
                 stats.updated++;
-                
+
                 // Mark this variant as processed
                 processedVariants.add(variant.id);
 
@@ -1283,19 +1287,19 @@ async function updatePrices() {
         }
 
         currentOperation = null; // Clear current operation when done
-        
+
         // Calculate reserved products statistics
         let reservedProducts = 0;
         let onlineProducts = 0;
         let totalReservedUnits = 0;
         const reservedProductsList = [];
         const onlineProductsList = [];
-        
+
         for (const [sku, inventoryInfo] of inventoryData) {
             // Find the corresponding Shopify variant to get product name
             const variant = shopifyVariants.get(sku);
             const productName = variant ? variant.product.title : 'Product not found in Shopify';
-            
+
             if (inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS) {
                 reservedProducts++;
                 totalReservedUnits += inventoryInfo.actualQuantity;
@@ -1326,13 +1330,13 @@ async function updatePrices() {
         Logger.info(`- Inventory updates: ${stats.inventoryUpdates}`);
         Logger.info(`Skipped: ${stats.skipped}`);
         Logger.info(`Errors: ${stats.errors}`);
-        
+
         Logger.section('Inventory Management');
         Logger.info(`Safety stock threshold: ${SAFETY_STOCK_UNITS} units`);
         Logger.info(`Products reserved for store (≤${SAFETY_STOCK_UNITS} units): ${reservedProducts}`);
         Logger.info(`Products available online (>${SAFETY_STOCK_UNITS} units): ${onlineProducts}`);
         Logger.info(`Total units reserved for physical store: ${totalReservedUnits}`);
-        
+
         // List reserved products (sorted by quantity, lowest first)
         Logger.info('\n--- PRODUCTS RESERVED FOR PHYSICAL STORE ---');
         reservedProductsList
@@ -1340,7 +1344,7 @@ async function updatePrices() {
             .forEach(product => {
                 Logger.info(`  SKU: ${product.sku} | Qty: ${product.quantity} | "${product.name}"`);
             });
-        
+
         // Show some examples of online products (first 20, sorted by highest quantity)
         Logger.info('\n--- PRODUCTS AVAILABLE ONLINE (Top 20 by quantity) ---');
         onlineProductsList
@@ -1379,7 +1383,7 @@ async function updatePrices() {
             const name = variant.product.title.toLowerCase();
             // Extract brand/product type (first 3-4 words)
             const nameKey = name.split(' ').slice(0, 4).join(' ');
-            
+
             if (!productGroups.has(nameKey)) {
                 productGroups.set(nameKey, []);
             }
@@ -1409,14 +1413,14 @@ async function updatePrices() {
         Logger.info('\nMISSING SKU MATCH SUGGESTIONS:');
         for (const missingItem of missingSkus) {
             Logger.info(`\nMissing SKU: ${missingItem.sku} (Target price: $${missingItem.discountPrice})`);
-            
+
             // Find products with similar prices (within 30% range)
             const priceMatches = [];
             for (const [sku, variant] of shopifyVariants) {
                 const currentPrice = parseFloat(variant.price);
                 const priceDiff = Math.abs(currentPrice - missingItem.discountPrice);
                 const pricePercent = (priceDiff / missingItem.discountPrice) * 100;
-                
+
                 if (pricePercent <= 30) { // Within 30% of target price
                     priceMatches.push({
                         sku,
@@ -1427,10 +1431,10 @@ async function updatePrices() {
                     });
                 }
             }
-            
+
             // Sort by price difference (closest matches first)
             priceMatches.sort((a, b) => a.priceDiff - b.priceDiff);
-            
+
             if (priceMatches.length > 0) {
                 Logger.info(`  Found ${priceMatches.length} possible matches by price:`);
                 priceMatches.slice(0, 5).forEach(match => {
@@ -1439,12 +1443,12 @@ async function updatePrices() {
             } else {
                 Logger.info(`  No products found with similar price (±30%)`);
             }
-            
+
             // Also look for SKU pattern matches (numeric similarity)
             if (/^\d+$/.test(missingItem.sku)) {
                 const numericSku = parseInt(missingItem.sku);
                 const nearbySkus = [];
-                
+
                 for (const [sku, variant] of shopifyVariants) {
                     if (/^\d+$/.test(sku)) {
                         const existingSku = parseInt(sku);
@@ -1459,7 +1463,7 @@ async function updatePrices() {
                         }
                     }
                 }
-                
+
                 if (nearbySkus.length > 0) {
                     nearbySkus.sort((a, b) => a.skuDiff - b.skuDiff);
                     Logger.info(`  Nearby SKUs (numeric pattern):`);
