@@ -887,6 +887,15 @@ async function getLocalInventory() {
                     normalized
                 });
             }
+
+            // DEBUG: Log specific SKUs to understand why we get 25 instead of -1
+            if (['1154', '001154', '01154'].includes(normalized.cleaned) || item.CodigoProducto.includes('1154')) {
+                Logger.info(`[DEBUG SKU ${item.CodigoProducto}] Found record:`);
+                Logger.info(`  Timestamp: ${timestamp.toISOString()} (from ${item.Fecha || 'fallback'})`);
+                Logger.info(`  Initial: ${item.CantidadInicial}, In: ${item.CantidadEntradas}, Out: ${item.CantidadSalidas}`);
+                const debugCalc = parseFloat(item.CantidadInicial || 0) + parseFloat(item.CantidadEntradas || 0) - parseFloat(item.CantidadSalidas || 0);
+                Logger.info(`  Calculated: ${debugCalc} (Clamped: ${Math.max(0, debugCalc)})`);
+            }
         }
 
         // Second pass: Process only the latest record for each SKU
