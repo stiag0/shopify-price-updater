@@ -832,7 +832,7 @@ async function getLocalInventory() {
         let duplicateSkus = 0;
 
         // First pass: Find the latest timestamp for each SKU
-        const latestRecords = new Map(); // SKU -> { item, timestamp, normalized }
+        const maxTimestamps = new Map(); // SKU -> Timestamp
 
         for (const item of inventoryData) {
             if (!item.CodigoProducto) {
@@ -878,63 +878,98 @@ async function getLocalInventory() {
             }
 
             const skuKey = normalized.cleaned;
-
-            // Check if this is the latest record for this SKU
-            if (!latestRecords.has(skuKey) || timestamp > latestRecords.get(skuKey).timestamp) {
-                latestRecords.set(skuKey, {
-                    item,
-                    timestamp,
-                    normalized
-                });
-            }
-
-            // DEBUG: Log specific SKUs to understand why we get 25 instead of -1
-            if (['1154', '001154', '01154'].includes(normalized.cleaned) || item.CodigoProducto.includes('1154')) {
-                Logger.info(`[DEBUG SKU ${item.CodigoProducto}] Found record:`);
-                Logger.info(`  Timestamp: ${timestamp.toISOString()} (from ${item.Fecha || 'fallback'})`);
-                Logger.info(`  Initial: ${item.CantidadInicial}, In: ${item.CantidadEntradas}, Out: ${item.CantidadSalidas}`);
-                const debugCalc = parseFloat(item.CantidadInicial || 0) + parseFloat(item.CantidadEntradas || 0) - parseFloat(item.CantidadSalidas || 0);
-                Logger.info(`  Calculated: ${debugCalc} (Clamped: ${Math.max(0, debugCalc)})`);
+            if (!maxTimestamps.has(skuKey) || timestamp > maxTimestamps.get(skuKey)) {
+                maxTimestamps.set(skuKey, timestamp);
             }
         }
 
-        // Second pass: Process only the latest record for each SKU
-        for (const [skuKey, record] of latestRecords) {
-            const item = record.item;
-            const normalized = record.normalized;
+        // Second pass: Sum all records that match the latest timestamp
+        const aggregatedInventory = new Map(); // SKU -> { total, item, timestamp, normalized }
 
-            // Use calculation method: CantidadInicial + CantidadEntradas - CantidadSalidas
-            const initial = parseFloat(item.CantidadInicial || 0);
-            const received = parseFloat(item.CantidadEntradas || 0);
-            const shipped = parseFloat(item.CantidadSalidas || 0);
+        for (const item of inventoryData) {
+            if (!item.CodigoProducto) continue;
+            const normalized = normalizeSkuForMatching(item.CodigoProducto);
+            if (!normalized.isValid) continue;
 
-            if (isNaN(initial) || isNaN(received) || isNaN(shipped)) {
-                Logger.warn(`Invalid inventory values for SKU ${item.CodigoProducto}`);
-                invalidCount++;
-                continue;
+            const skuKey = normalized.cleaned;
+            const maxTs = maxTimestamps.get(skuKey);
+
+            // Re-parse timestamp to compare
+            let timestamp = item.Fecha ? new Date(item.Fecha) : new Date();
+            if (item.Fecha) {
+                timestamp = new Date(item.Fecha);
+            } else {
+                const possibleTimestampFields = [
+                    'FechaCreacion', 'FechaModificacion', 'Timestamp',
+                    'CreatedAt', 'UpdatedAt', 'Date', 'Time', 'FechaHora'
+                ];
+                for (const field of possibleTimestampFields) {
+                    if (item[field]) {
+                        timestamp = new Date(item[field]);
+                        if (!isNaN(timestamp.getTime())) break;
+                    }
+                }
             }
+            if (isNaN(timestamp.getTime())) timestamp = new Date();
 
-            const calculatedQuantity = Math.max(0, initial + received - shipped);
+            // Allow a small tolerance or direct exact match
+            if (maxTs && timestamp.getTime() === maxTs.getTime()) {
+                const initial = parseFloat(item.CantidadInicial || 0);
+                const received = parseFloat(item.CantidadEntradas || 0);
+                const shipped = parseFloat(item.CantidadSalidas || 0);
+
+                if (isNaN(initial) || isNaN(received) || isNaN(shipped)) {
+                    Logger.warn(`Invalid inventory values for SKU ${item.CodigoProducto}`);
+                    continue;
+                }
+
+                const calculated = initial + received - shipped;
+
+                if (!aggregatedInventory.has(skuKey)) {
+                    aggregatedInventory.set(skuKey, {
+                        calculated: 0,
+                        item: item, // Keep one item for reference (metadata)
+                        timestamp: maxTs,
+                        normalized: normalized
+                    });
+                }
+
+                const currentData = aggregatedInventory.get(skuKey);
+                currentData.calculated += calculated;
+            }
+        }
+
+        // Process aggregated results
+        for (const [skuKey, data] of aggregatedInventory) {
+            const { calculated, item, timestamp, normalized } = data;
+
+            // Ensure no negative inventory
+            const finalQuantity = Math.max(0, calculated);
+
+            // DEBUG: Log specific SKUs
+            if (['1154', '001154', '01154'].includes(normalized.cleaned) || item.CodigoProducto.includes('1154')) {
+                Logger.info(`[DEBUG SKU ${item.CodigoProducto}] Aggregated Total: ${calculated} (Clamped: ${finalQuantity}) - Timestamp: ${timestamp.toISOString()}`);
+            }
 
             // Safety stock logic: If inventory is 5 or less, don't sell online (keep all for store)
             let shopifyQuantity;
-            if (calculatedQuantity <= SAFETY_STOCK_UNITS) {
+            if (finalQuantity <= SAFETY_STOCK_UNITS) {
                 shopifyQuantity = 0; // Don't sell online, keep all units for physical store
             } else {
-                shopifyQuantity = Math.floor(calculatedQuantity); // Sell full amount online (enough for store)
+                shopifyQuantity = Math.floor(finalQuantity); // Sell full amount online (enough for store)
             }
 
             const inventoryData = {
                 quantity: shopifyQuantity,
-                actualQuantity: Math.floor(calculatedQuantity), // Keep track of actual inventory
+                actualQuantity: Math.floor(finalQuantity), // Keep track of actual inventory
                 rawSku: item.CodigoProducto,
-                timestamp: record.timestamp,
+                timestamp: timestamp,
                 fecha: item.Fecha, // Store the original date for reference
                 calculation: {
-                    initial: initial,
-                    received: received,
-                    shipped: shipped,
-                    calculated: calculatedQuantity
+                    initial: 0, // Not applicable in aggregated view
+                    received: 0,
+                    shipped: 0,
+                    calculated: finalQuantity
                 }
             };
 
