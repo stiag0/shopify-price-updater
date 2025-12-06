@@ -1532,7 +1532,14 @@ async function updatePrices() {
 }
 
 // --- Script Execution ---
-updatePrices().catch(error => {
-    Logger.error('Script failed:', error);
-    process.exit(1);
-}); 
+// --- Script Execution ---
+updatePrices()
+    .then(async () => {
+        await Logger.flush();
+        // process.exit(0) is implied, but good to be explicit if using async
+    })
+    .catch(async error => {
+        Logger.error('Script failed:', error);
+        await Logger.flush();
+        process.exit(1);
+    }); 
