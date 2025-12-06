@@ -46,7 +46,7 @@ class Logger {
     init(executionStartTime, baseLogDir, maxSizeMB) {
         this.currentLogFileStartTime = executionStartTime || new Date();
         this.logDir = path.resolve(baseLogDir || this.logBaseDirFromEnv); // Usar path.resolve para rutas absolutas
-        
+
         if (maxSizeMB && !isNaN(parseInt(maxSizeMB))) {
             this.logMaxSizeBytes = parseInt(maxSizeMB) * 1024 * 1024;
         }
@@ -77,8 +77,8 @@ class Logger {
         this.isWriting = true;
         // La rotación de logs es menos crítica si cada ejecución tiene su propio archivo,
         // pero se mantiene por si un solo script corre por mucho tiempo y genera un log muy grande.
-        await this.checkLogSize(); 
-        
+        await this.checkLogSize();
+
         const messagesToWrite = this.logQueue.splice(0, this.logQueue.length); // Tomar todos los mensajes pendientes
         const logContent = messagesToWrite.join('');
 
@@ -114,7 +114,7 @@ class Logger {
             try {
                 formattedMessage = JSON.stringify(message, (key, value) =>
                     typeof value === 'string' && value.length > 1000 ? value.substring(0, 1000) + '... (truncated)' : value,
-                2); // indentación de 2 espacios
+                    2); // indentación de 2 espacios
             } catch (e) {
                 formattedMessage = '[Unserializable Object]';
             }
@@ -126,11 +126,11 @@ class Logger {
         if (level === 'ERROR') { console.error(logEntry.trim()); }
         else if (level === 'WARN') { console.warn(logEntry.trim()); }
         else if (level !== 'DEBUG' || process.env.LOG_LEVEL === 'DEBUG') { console.log(logEntry.trim()); }
-        
+
         this.logQueue.push(logEntry);
         // Disparar el procesamiento de la cola de forma asíncrona pero pronto
         if (!this.isWriting) {
-             setTimeout(() => this.processQueue(), 50); // Pequeño delay para agrupar logs rápidos
+            setTimeout(() => this.processQueue(), 50); // Pequeño delay para agrupar logs rápidos
         }
     }
 
@@ -144,7 +144,7 @@ class Logger {
             if (error.response && error.response.data) {
                 logMessage += `\nResponse Data: ${JSON.stringify(error.response.data)}`;
             } else if (error.response && error.response.status) {
-                 logMessage += `\nResponse Status: ${error.response.status}`;
+                logMessage += `\nResponse Status: ${error.response.status}`;
             }
         }
         this.log(logMessage, 'ERROR');
@@ -159,8 +159,8 @@ class Logger {
         if (!this.logPath) return;
         try {
             if (!fs.existsSync(this.logPath)) {
-                 console.warn(`[${new Date().toISOString()}] [WARN] Log file ${this.logPath} not found during size check.`);
-                 return;
+                console.warn(`[${new Date().toISOString()}] [WARN] Log file ${this.logPath} not found during size check.`);
+                return;
             }
             const stats = await fs.promises.stat(this.logPath);
             if (stats.size >= this.logMaxSizeBytes) {
@@ -184,7 +184,7 @@ class Logger {
         const rotationTimestamp = this.formatDateForFilename(new Date());
         const backupFilename = `${logFileBaseName}_rotated_${rotationTimestamp}.log`;
         const backupPath = path.join(this.logDir, backupFilename);
-        
+
         const rotateMessage = `Rotating large log file. Current log for execution started at ${this.currentLogFileStartTime.toISOString()}. Archived as: ${backupFilename}`;
         this.log(rotateMessage, 'INFO'); // Registrar el intento de rotación
 
@@ -197,9 +197,9 @@ class Logger {
                 // Se creará uno nuevo en la próxima escritura si es necesario.
                 return;
             }
-            
+
             await fs.promises.rename(this.logPath, backupPath);
-            
+
             // Crear un nuevo archivo de log para la misma ejecución, indicando que es una continuación.
             const continuationMessage = `[${new Date().toISOString()}] [INFO] New log segment started after rotation for execution started at ${this.currentLogFileStartTime.toISOString()}.\nPrevious segment archived to: ${backupFilename}\n`;
             await fs.promises.writeFile(this.logPath, continuationMessage, 'utf8');
@@ -224,7 +224,8 @@ class Logger {
      */
     async flush() {
         if (!this.logPath && this.logQueue.length === 0) return; // Nada que hacer si no hay path y la cola está vacía
-        
+
+        console.log("[Logger] Flushing logs...");
         const maxWaitTime = 5000; // Máximo 5 segundos de espera para el flush
         const startTime = Date.now();
 
