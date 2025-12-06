@@ -984,7 +984,7 @@ async function getLocalInventory() {
 
         // Count how many SKUs had multiple records (for informational purposes)
         const totalRecords = inventoryData.length;
-        const uniqueSkus = latestRecords.size;
+        const uniqueSkus = aggregatedInventory.size;
         if (totalRecords > uniqueSkus) {
             duplicateSkus = totalRecords - uniqueSkus;
             Logger.info(`Found ${duplicateSkus} duplicate records across ${uniqueSkus} unique SKUs (efficiency: ${((uniqueSkus / totalRecords) * 100).toFixed(1)}%)`);
