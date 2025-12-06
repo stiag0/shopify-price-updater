@@ -45,7 +45,7 @@ async function getLocalInventory() {
         console.log(`Received ${inventoryData.length} records.`);
 
         // Target SKUs to debug
-        const targetSkus = ['1154', '001154', '11154', '011154'];
+        const targetSkus = ['1154', '001154', '9864', '009864', '9865', '9863'];
 
         // Store all records for target SKUs
         const debugRecords = [];
