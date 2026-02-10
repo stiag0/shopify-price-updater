@@ -1,21 +1,20 @@
 {
-  "name": "shopify-price-updater",
+  "name": "shopify-direct-price-updater",
   "version": "1.0.0",
-  "description": "Robust Shopify price and inventory updater with bulk operations support",
-  "main": "src/index.js",
+  "description": "A simple Node.js script to update Shopify product prices directly from a CSV file",
+  "main": "shopify-direct-price-updater.js",
   "scripts": {
-    "start": "node src/index.js",
-    "test": "jest"
+    "start": "node shopify-direct-price-updater.js"
   },
   "dependencies": {
     "axios": "^1.6.7",
-    "dotenv": "^16.4.1",
-    "csv-parse": "^5.5.3",
-    "winston": "^3.11.0",
-    "p-limit": "^3.1.0",
-    "node-cache": "^5.1.2"
+    "csv-parser": "^3.0.0",
+    "dotenv": "^16.4.5",
+    "limiter": "^2.1.0"
   },
-  "devDependencies": {
-    "jest": "^29.7.0"
-  }
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "author": "",
+  "license": "MIT"
 } 
