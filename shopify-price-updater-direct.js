@@ -277,6 +277,68 @@ async function fetchWithRetry(operation, retries = parseInt(MAX_RETRIES, 10)) {
     }
 }
 
+// Returns the current month name in Spanish, matching Delfin API endpoint naming.
+// e.g. March -> "Marzo" -> endpoint InventarioDiarioMarzo
+function getCurrentMonthEndpointName() {
+    const months = ['Enero','Febrero','Marzo','Abril','Mayo','Junio',
+                    'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+    return months[new Date().getMonth()];
+}
+
+// Fetches the daily inventory movements for the current month from Delfin.
+// Returns a Map<skuKey, totalSalesQty> representing the sum of CantidadSalidas
+// (exits/sales) recorded so far this month per SKU.
+// If the endpoint is unavailable or returns no data, returns an empty Map so
+// the caller can fall back to the monthly snapshot without crashing.
+async function getDailyInventoryMovements() {
+    const monthName = getCurrentMonthEndpointName();
+    // Build URL by replacing the InventarioMensual segment with InventarioDiario{Month}
+    const dailyApiUrl = INVENTORY_API_URL.replace(
+        /InventarioMensual/,
+        `InventarioDiario${monthName}`
+    );
+
+    Logger.info(`Fetching daily inventory movements from ${dailyApiUrl}`);
+
+    try {
+        const result = await inventoryApiClient.get(dailyApiUrl);
+        const records = result?.data?.value;
+
+        if (!Array.isArray(records) || records.length === 0) {
+            Logger.warn('Daily inventory endpoint returned no records - falling back to monthly snapshot only.');
+            return new Map();
+        }
+
+        Logger.info(`Received ${records.length} daily inventory records for ${monthName}`);
+
+        // Aggregate total exits (sales) per SKU for the current month
+        const salesMap = new Map(); // skuKey -> totalSalesQty
+        for (const item of records) {
+            if (!item.CodigoProducto) continue;
+            const normalized = normalizeSkuForMatching(item.CodigoProducto);
+            if (!normalized.isValid) continue;
+
+            const sales = parseFloat(item.CantidadSalidas || 0);
+            if (isNaN(sales)) continue;
+
+            const key = normalized.cleaned;
+            salesMap.set(key, (salesMap.get(key) || 0) + sales);
+            // Also store under padded key for consistent lookup
+            if (normalized.padded !== normalized.cleaned) {
+                salesMap.set(normalized.padded, (salesMap.get(normalized.padded) || 0) + sales);
+            }
+        }
+
+        Logger.info(`Processed daily sales for ${Math.ceil(salesMap.size / 2)} unique SKUs`);
+        return salesMap;
+
+    } catch (error) {
+        // Non-fatal: if this endpoint fails, log a warning and continue with monthly data only
+        Logger.warn(`Could not fetch daily inventory (${error.message}). Using monthly snapshot only.`);
+        return new Map();
+    }
+}
+
 // --- Shopify API Functions ---
 async function getAllShopifyVariants() {
     Logger.info("Fetching all product variants from Shopify...");
@@ -764,8 +826,10 @@ async function getDiscountPrices() {
     }
 }
 
-// Add getLocalInventory function
-async function getLocalInventory() {
+// Fetches monthly inventory snapshot from InventarioMensual and adjusts it
+// with real-time sales from InventarioDiario[CurrentMonth] for accuracy.
+// The dailySalesMap parameter is the result of getDailyInventoryMovements().
+async function getLocalInventory(dailySalesMap = new Map()) {
     try {
         Logger.info(`Fetching inventory from ${INVENTORY_API_URL}`);
         const response = await fetchWithRetry(async () => {
@@ -925,6 +989,10 @@ async function getLocalInventory() {
 
                 const calculated = initial + received - shipped;
 
+                // Subtract current-month sales not yet reflected in the monthly snapshot.
+                // The monthly snapshot is frozen at the start of the month, so we must
+                // deduct sales that happened since then to get the real current stock.
+
                 if (!aggregatedInventory.has(skuKey)) {
                     aggregatedInventory.set(skuKey, {
                         calculated: 0,
@@ -943,8 +1011,16 @@ async function getLocalInventory() {
         for (const [skuKey, data] of aggregatedInventory) {
             const { calculated, item, timestamp, normalized } = data;
 
+            // Subtract current-month daily sales from the monthly opening balance
+            const dailySales = dailySalesMap.get(skuKey) || 0;
+            const realStock = calculated - dailySales;
+
+            if (dailySales > 0) {
+                Logger.info(`[DAILY ADJ] SKU ${normalized.cleaned}: Monthly base=${calculated}, Daily sales this month=${dailySales}, Real stock=${realStock}`);
+            }
+
             // Ensure no negative inventory
-            const finalQuantity = Math.max(0, calculated);
+            const finalQuantity = Math.max(0, realStock);
 
             // DEBUG: Log specific SKUs
             if (['1154', '001154', '01154'].includes(normalized.cleaned) || item.CodigoProducto.includes('1154')) {
@@ -1089,12 +1165,16 @@ async function updatePrices() {
         // Fetch all data in parallel
         currentOperation = 'Data Fetching';
         Logger.section('Data Fetching');
-        const [shopifyData, originalPrices, discountPricesResult, inventoryData] = await Promise.all([
+        // Step 1: Fetch all independent data sources in parallel (daily sales + others)
+        const [shopifyData, originalPrices, discountPricesResult, dailySalesMap] = await Promise.all([
             getAllShopifyVariants(),
             getOriginalPrices(),
             getDiscountPrices(),
-            getLocalInventory()
+            getDailyInventoryMovements()
         ]);
+
+        // Step 2: Calculate real-time inventory using the daily sales adjustments
+        const inventoryData = await getLocalInventory(dailySalesMap);
 
         const { variants: shopifyVariants, locationId } = shopifyData;
         const discountPrices = discountPricesResult.priceMap;
@@ -1102,7 +1182,7 @@ async function updatePrices() {
         Logger.info(`Found ${shopifyVariants.size} variants in Shopify`);
         Logger.info(`Loaded ${originalPrices.size} original prices`);
         Logger.info(`Loaded ${discountPricesResult.uniqueCount} discount prices`);
-        Logger.info(`Loaded ${inventoryData.size} inventory records`);
+        Logger.info(`Loaded ${inventoryData.size} inventory records (adjusted with current-month daily sales)`);
 
         // Add this debug section after loading all data
         Logger.section('DEBUG INFO');
