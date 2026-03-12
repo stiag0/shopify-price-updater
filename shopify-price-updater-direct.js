@@ -315,6 +315,11 @@ async function getDailyInventoryMovements() {
         const salesMap = new Map(); // skuKey -> totalSalesQty
         for (const item of records) {
             if (!item.CodigoProducto) continue;
+            
+            // CRITICAL: Filter by warehouse 1 (Main warehouse)
+            // The daily movements API might return sales from all locations
+            if (parseInt(item.CodigoBodega || 0) !== 1) continue;
+
             const normalized = normalizeSkuForMatching(item.CodigoProducto);
             if (!normalized.isValid) continue;
 
@@ -329,7 +334,7 @@ async function getDailyInventoryMovements() {
             }
         }
 
-        Logger.info(`Processed daily sales for ${Math.ceil(salesMap.size / 2)} unique SKUs`);
+        Logger.info(`Processed daily sales for ${Math.ceil(salesMap.size / 2)} unique SKUs in Bodega 1`);
         return salesMap;
 
     } catch (error) {
@@ -978,24 +983,25 @@ async function getLocalInventory(dailySalesMap = new Map()) {
 
             // Allow a small tolerance or direct exact match
             if (maxTs && timestamp.getTime() === maxTs.getTime()) {
+                // NEW FORMULA: (Initial + Entries) - Current Month Sales
+                // We ignore CantidadSalidas from the monthly report because it's stale/inconsistent,
+                // and instead rely on the fresh total sum from the daily movements API.
                 const initial = parseFloat(item.CantidadInicial || 0);
-                const received = parseFloat(item.CantidadEntradas || 0);
-                const shipped = parseFloat(item.CantidadSalidas || 0);
+                const entries = parseFloat(item.CantidadEntradas || 0);
+                const totalBase = initial + entries;
+                const dailySales = dailySalesMap.get(skuKey) || 0; // Get daily sales for this SKU
+                const realStock = totalBase - dailySales;
 
-                if (isNaN(initial) || isNaN(received) || isNaN(shipped)) {
-                    Logger.warn(`Invalid inventory values for SKU ${item.CodigoProducto}`);
+                Logger.info(`[DAILY ADJ] SKU ${item.CodigoProducto}: Monthly base (Init+Entries)=${totalBase}, Total daily exits this month=${dailySales}, Real stock=${realStock}`);
+
+                if (isNaN(realStock)) {
+                    Logger.warn(`Invalid stock calculation for SKU ${item.CodigoProducto}: Base=${totalBase}, Sales=${dailySales}`);
                     continue;
                 }
 
-                const calculated = initial + received - shipped;
-
-                // Subtract current-month sales not yet reflected in the monthly snapshot.
-                // The monthly snapshot is frozen at the start of the month, so we must
-                // deduct sales that happened since then to get the real current stock.
-
                 if (!aggregatedInventory.has(skuKey)) {
                     aggregatedInventory.set(skuKey, {
-                        calculated: 0,
+                        calculated: 0, // This will now store the realStock
                         item: item, // Keep one item for reference (metadata)
                         timestamp: maxTs,
                         normalized: normalized
@@ -1003,7 +1009,7 @@ async function getLocalInventory(dailySalesMap = new Map()) {
                 }
 
                 const currentData = aggregatedInventory.get(skuKey);
-                currentData.calculated += calculated;
+                currentData.calculated += realStock; // Sum up the realStock for this SKU
             }
         }
 
@@ -1011,16 +1017,9 @@ async function getLocalInventory(dailySalesMap = new Map()) {
         for (const [skuKey, data] of aggregatedInventory) {
             const { calculated, item, timestamp, normalized } = data;
 
-            // Subtract current-month daily sales from the monthly opening balance
-            const dailySales = dailySalesMap.get(skuKey) || 0;
-            const realStock = calculated - dailySales;
-
-            if (dailySales > 0) {
-                Logger.info(`[DAILY ADJ] SKU ${normalized.cleaned}: Monthly base=${calculated}, Daily sales this month=${dailySales}, Real stock=${realStock}`);
-            }
-
-            // Ensure no negative inventory
-            const finalQuantity = Math.max(0, realStock);
+            // The 'calculated' value now already includes the daily sales adjustment
+            // and represents the real stock.
+            const finalQuantity = Math.max(0, calculated);
 
             // DEBUG: Log specific SKUs
             if (['1154', '001154', '01154'].includes(normalized.cleaned) || item.CodigoProducto.includes('1154')) {
@@ -1620,6 +1619,7 @@ updatePrices()
     })
     .catch(async error => {
         Logger.error('Script failed:', error);
-        await Logger.flush();
+        // Final flush of logs
+        await Logger.close();
         process.exit(1);
-    }); 
+    });
