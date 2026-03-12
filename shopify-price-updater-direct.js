@@ -313,6 +313,10 @@ async function getDailyInventoryMovements() {
 
         // Aggregate total exits (sales) per SKU for the current month
         const salesMap = new Map(); // skuKey -> totalSalesQty
+        if (records.length > 0) {
+            Logger.info(`DEBUG: First daily record keys: ${Object.keys(records[0]).join(', ')}`);
+            Logger.info(`DEBUG: First daily record sample: ${JSON.stringify(records[0])}`);
+        }
         for (const item of records) {
             if (!item.CodigoProducto) continue;
             
@@ -894,6 +898,10 @@ async function getLocalInventory(dailySalesMap = new Map()) {
         }
 
         Logger.info(`Received ${inventoryData.length} inventory records from API`);
+        if (inventoryData.length > 0) {
+            Logger.info(`DEBUG: First monthly record keys: ${Object.keys(inventoryData[0]).join(', ')}`);
+            Logger.info(`DEBUG: First monthly record sample: ${JSON.stringify(inventoryData[0])}`);
+        }
 
         const inventoryMap = new Map();
         let processedCount = 0;
