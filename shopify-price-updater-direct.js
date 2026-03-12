@@ -915,6 +915,11 @@ async function getLocalInventory(dailySalesMap = new Map()) {
                 continue;
             }
 
+            // CRITICAL: Filter by warehouse 1 (Main warehouse)
+            if (parseInt(item.CodigoBodega || 0) !== 1) {
+                continue;
+            }
+
             // Use Fecha field for timestamp (matches your API structure)
             let timestamp = null;
             if (item.Fecha) {
@@ -957,6 +962,10 @@ async function getLocalInventory(dailySalesMap = new Map()) {
 
         for (const item of inventoryData) {
             if (!item.CodigoProducto) continue;
+            
+            // CRITICAL: Filter by warehouse 1 (Main warehouse)
+            if (parseInt(item.CodigoBodega || 0) !== 1) continue;
+
             const normalized = normalizeSkuForMatching(item.CodigoProducto);
             if (!normalized.isValid) continue;
 
@@ -1614,7 +1623,7 @@ async function updatePrices() {
 // --- Script Execution ---
 updatePrices()
     .then(async () => {
-        await Logger.flush();
+        await Logger.close();
         // process.exit(0) is implied, but good to be explicit if using async
     })
     .catch(async error => {
