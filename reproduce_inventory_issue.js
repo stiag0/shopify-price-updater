@@ -43,6 +43,10 @@ async function getLocalInventory() {
         const inventoryData = response.data?.value || [];
 
         console.log(`Received ${inventoryData.length} records.`);
+        if (inventoryData.length > 0) {
+            console.log('DEBUG: First record keys:', Object.keys(inventoryData[0]));
+            console.log('DEBUG: First record sample:', JSON.stringify(inventoryData[0]));
+        }
 
         // Target SKUs to debug
         const targetSkus = ['1154', '001154', '9864', '009864', '9865', '9863'];
