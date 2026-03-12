@@ -320,9 +320,9 @@ async function getDailyInventoryMovements() {
         for (const item of records) {
             if (!item.CodigoProducto) continue;
             
-            // CRITICAL: Filter by warehouse 1 (Main warehouse)
-            // The daily movements API might return sales from all locations
-            if (parseInt(item.CodigoBodega || 0) !== 1) continue;
+            // CRITICAL: Filter by Warehouse 0101 (Main warehouse)
+            // The daily movements API usually uses CodigoCentroCosto for locations
+            if (String(item.CodigoCentroCosto || '').trim() !== '0101') continue;
 
             const normalized = normalizeSkuForMatching(item.CodigoProducto);
             if (!normalized.isValid) continue;
@@ -923,8 +923,8 @@ async function getLocalInventory(dailySalesMap = new Map()) {
                 continue;
             }
 
-            // CRITICAL: Filter by warehouse 1 (Main warehouse)
-            if (parseInt(item.CodigoBodega || 0) !== 1) {
+            // CRITICAL: Filter by Warehouse 0101 (Main warehouse)
+            if (String(item.CodigoCentroCosto || '').trim() !== '0101') {
                 continue;
             }
 
@@ -971,8 +971,8 @@ async function getLocalInventory(dailySalesMap = new Map()) {
         for (const item of inventoryData) {
             if (!item.CodigoProducto) continue;
             
-            // CRITICAL: Filter by warehouse 1 (Main warehouse)
-            if (parseInt(item.CodigoBodega || 0) !== 1) continue;
+            // CRITICAL: Filter by Warehouse 0101 (Main warehouse)
+            if (String(item.CodigoCentroCosto || '').trim() !== '0101') continue;
 
             const normalized = normalizeSkuForMatching(item.CodigoProducto);
             if (!normalized.isValid) continue;
