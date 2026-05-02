@@ -1563,7 +1563,7 @@ async function updatePrices() {
         const productGroups = new Map();
         let groupCount = 0;
 
-        for (const [sku, variant] of shopifyVariants) {
+        for (const variant of allShopifyVariants) {
             const name = variant.product.title.toLowerCase();
             // Extract brand/product type (first 3-4 words)
             const nameKey = name.split(' ').slice(0, 4).join(' ');
@@ -1572,7 +1572,7 @@ async function updatePrices() {
                 productGroups.set(nameKey, []);
             }
             productGroups.get(nameKey).push({
-                sku,
+                sku: variant.sku,
                 name: variant.product.title,
                 price: parseFloat(variant.price),
                 compareAt: variant.compareAtPrice
@@ -1600,14 +1600,14 @@ async function updatePrices() {
 
             // Find products with similar prices (within 30% range)
             const priceMatches = [];
-            for (const [sku, variant] of shopifyVariants) {
+            for (const variant of allShopifyVariants) {
                 const currentPrice = parseFloat(variant.price);
                 const priceDiff = Math.abs(currentPrice - missingItem.discountPrice);
                 const pricePercent = (priceDiff / missingItem.discountPrice) * 100;
 
                 if (pricePercent <= 30) { // Within 30% of target price
                     priceMatches.push({
-                        sku,
+                        sku: variant.sku,
                         name: variant.product.title,
                         price: currentPrice,
                         priceDiff,
@@ -1633,7 +1633,8 @@ async function updatePrices() {
                 const numericSku = parseInt(missingItem.sku);
                 const nearbySkus = [];
 
-                for (const [sku, variant] of shopifyVariants) {
+                for (const variant of allShopifyVariants) {
+                    const sku = variant.sku;
                     if (/^\d+$/.test(sku)) {
                         const existingSku = parseInt(sku);
                         const skuDiff = Math.abs(existingSku - numericSku);
