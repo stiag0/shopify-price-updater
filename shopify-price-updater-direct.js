@@ -417,7 +417,8 @@ async function getAllShopifyVariants() {
         Logger.info(`Found Shopify location: ${locations[0].node.name} (${locationId})`);
 
         // Fetch all variants with pagination
-        const variants = new Map();
+        const variantsMap = new Map();
+        const allVariants = [];
         let hasNextPage = true;
         let cursor = null;
         let totalFetched = 0;
@@ -494,9 +495,21 @@ async function getAllShopifyVariants() {
                                 title: node.product.title
                             }
                         };
-                        variants.set(normalized.cleaned, variantData);
+                        
+                        // Add to all variants list (unique nodes)
+                        allVariants.push(variantData);
+
+                        // Add to map for lookup (supporting multiple variants per normalized SKU)
+                        const addToMap = (key) => {
+                            if (!variantsMap.has(key)) {
+                                variantsMap.set(key, []);
+                            }
+                            variantsMap.get(key).push(variantData);
+                        };
+
+                        addToMap(normalized.cleaned);
                         if (normalized.padded !== normalized.cleaned) {
-                            variants.set(normalized.padded, variantData);
+                            addToMap(normalized.padded);
                         }
                     }
                 }
@@ -523,7 +536,7 @@ async function getAllShopifyVariants() {
         }
 
         Logger.info(`Successfully fetched ${totalFetched} total variants from Shopify`);
-        return { variants, locationId };
+        return { variants: variantsMap, allVariants, locationId };
 
     } catch (error) {
         // Enhanced error logging
@@ -1001,15 +1014,30 @@ async function getLocalInventory(dailySalesMap = new Map()) {
             // Allow a small tolerance or direct exact match
             if (maxTs && timestamp.getTime() === maxTs.getTime()) {
                 // NEW FORMULA: (Initial + Entries) - Current Month Sales
-                // We ignore CantidadSalidas from the monthly report because it's stale/inconsistent,
-                // and instead rely on the fresh total sum from the daily movements API.
+                // We ignore CantidadSalidas from the monthly report ONLY if it's the current month,
+                // because dailySalesMap has more fresh data for the current month.
+                // But for past months, CantidadSalidas represents real sales we must subtract.
                 const initial = parseFloat(item.CantidadInicial || 0);
                 const entries = parseFloat(item.CantidadEntradas || 0);
-                const totalBase = initial + entries;
-                const dailySales = dailySalesMap.get(skuKey) || 0; // Get daily sales for this SKU
+                const exitsInRecord = parseFloat(item.CantidadSalidas || 0);
+                
+                const now = new Date();
+                const recordDate = new Date(item.Fecha);
+                const isCurrentMonth = recordDate.getMonth() === now.getMonth() && recordDate.getFullYear() === now.getFullYear();
+
+                let totalBase;
+                if (isCurrentMonth) {
+                    totalBase = initial + entries;
+                    Logger.info(`[DAILY ADJ] SKU ${item.CodigoProducto}: Current month record (${recordDate.toISOString().substring(0,7)}). Base (Init+Entries)=${totalBase}`);
+                } else {
+                    totalBase = initial + entries - exitsInRecord;
+                    Logger.info(`[DAILY ADJ] SKU ${item.CodigoProducto}: Past month record (${recordDate.toISOString().substring(0,7)}). Base (Init+Entries-Exits)=${totalBase}`);
+                }
+
+                const dailySales = dailySalesMap.get(skuKey) || 0; // Get daily sales for the current month
                 const realStock = totalBase - dailySales;
 
-                Logger.info(`[DAILY ADJ] SKU ${item.CodigoProducto}: Monthly base (Init+Entries)=${totalBase}, Total daily exits this month=${dailySales}, Real stock=${realStock}`);
+                Logger.info(`[DAILY ADJ] SKU ${item.CodigoProducto}: Total daily exits this month=${dailySales}, Final Real stock=${realStock}`);
 
                 if (isNaN(realStock)) {
                     Logger.warn(`Invalid stock calculation for SKU ${item.CodigoProducto}: Base=${totalBase}, Sales=${dailySales}`);
@@ -1192,10 +1220,10 @@ async function updatePrices() {
         // Step 2: Calculate real-time inventory using the daily sales adjustments
         const inventoryData = await getLocalInventory(dailySalesMap);
 
-        const { variants: shopifyVariants, locationId } = shopifyData;
+        const { variants: shopifyVariants, allVariants: allShopifyVariants, locationId } = shopifyData;
         const discountPrices = discountPricesResult.priceMap;
 
-        Logger.info(`Found ${shopifyVariants.size} variants in Shopify`);
+        Logger.info(`Found ${shopifyVariants.size} unique SKUs in Shopify (${allShopifyVariants.length} total variants)`);
         Logger.info(`Loaded ${originalPrices.size} original prices`);
         Logger.info(`Loaded ${discountPricesResult.uniqueCount} discount prices`);
         Logger.info(`Loaded ${inventoryData.size} inventory records (adjusted with current-month daily sales)`);
@@ -1203,26 +1231,29 @@ async function updatePrices() {
         // Add this debug section after loading all data
         Logger.section('DEBUG INFO');
 
-        // Show first 10 Shopify SKUs with product names
-        Logger.info('First 10 Shopify SKUs found:');
+        // Show first 10 Shopify variants with product names
+        Logger.info('First 10 Shopify variants found:');
         let count = 0;
-        for (const [sku, variant] of shopifyVariants) {
+        for (const variant of allShopifyVariants) {
             if (count < 10) {
-                Logger.info(`  ${sku} (${variant.product.title}) -> Price: ${variant.price}, Compare-at: ${variant.compareAtPrice || 'null'}`);
+                Logger.info(`  ${variant.sku} (${variant.product.title}) -> Price: ${variant.price}, Compare-at: ${variant.compareAtPrice || 'null'}`);
                 count++;
+            } else {
+                break;
             }
         }
 
         // Show all discount SKUs and whether they exist
         Logger.info('Discount SKUs check:');
         for (const [sku, discountData] of discountPrices) {
-            const exists = shopifyVariants.has(sku);
+            const matchingVariants = shopifyVariants.get(sku) || [];
+            const exists = matchingVariants.length > 0;
             const originalData = originalPrices.get(sku);
 
             Logger.info(`  ${sku} -> Exists: ${exists}, Discount Price: ${discountData.newPrice}`);
 
             if (exists) {
-                const variant = shopifyVariants.get(sku);
+                const variant = matchingVariants[0];
                 const inventoryInfo = inventoryData.get(sku);
 
                 Logger.info(`    Product: "${variant.product.title}"`);
@@ -1286,69 +1317,69 @@ async function updatePrices() {
         Logger.section('Processing Discount Products');
         for (const [sku, discountData] of discountPrices) {
             try {
-                stats.total++;
-                const variant = shopifyVariants.get(sku);
+                const matchingVariants = shopifyVariants.get(sku) || [];
+                
+                if (matchingVariants.length === 0) {
+                    Logger.warn(`SKU ${sku} (Discount) not found in Shopify`);
+                    stats.skipped++;
+                    continue;
+                }
+
                 const originalData = originalPrices.get(sku);
                 const inventoryItem = inventoryData.get(sku);
 
-                if (!variant) {
-                    Logger.warn(`SKU ${sku} not found in Shopify`);
-                    stats.skipped++;
-                    continue;
+                for (const variant of matchingVariants) {
+                    stats.total++;
+
+                    // Check if we've already processed this variant ID
+                    if (processedVariants.has(variant.id)) {
+                        Logger.info(`SKU ${sku}: Skipping variant ${variant.id} (already processed via different SKU format)`);
+                        stats.skipped++;
+                        continue;
+                    }
+
+                    if (!originalData) {
+                        Logger.warn(`SKU ${sku}: Original price not found in local API, skipping price update but checking inventory`);
+                    }
+
+                    const currentPrice = parseFloat(variant.price);
+                    const newPrice = discountData.newPrice;
+                    const compareAtPrice = originalData ? originalData.originalPrice : currentPrice;
+                    const newInventory = inventoryItem?.quantity;
+
+                    // Skip if no changes needed
+                    const priceNeedsUpdate = currentPrice !== newPrice || parseFloat(variant.compareAtPrice || 0) !== compareAtPrice;
+                    const inventoryNeedsUpdate = newInventory !== null && newInventory !== undefined && (
+                        newInventory !== variant.currentInventory ||
+                        (newInventory === 0 && variant.currentInventory !== 0)
+                    );
+
+                    // Log zero inventory enforcement for debugging
+                    if (newInventory === 0 && variant.currentInventory !== 0) {
+                        Logger.info(`SKU ${sku}: Forcing zero inventory update (Local: 0, Shopify: ${variant.currentInventory}) - Safety stock enforcement`);
+                    }
+
+                    if (!priceNeedsUpdate && !inventoryNeedsUpdate) {
+                        Logger.info(`SKU ${sku} (${variant.product.title}): No updates needed (Discount Product)`);
+                        stats.skipped++;
+                        processedVariants.add(variant.id);
+                        continue;
+                    }
+
+                    // Update variant
+                    await updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId);
+
+                    Logger.info(`SKU ${sku} (${variant.product.title}): Updated successfully`);
+
+                    if (priceNeedsUpdate) {
+                        stats.priceUpdates++;
+                        stats.discountProducts++;
+                    }
+                    if (inventoryNeedsUpdate) stats.inventoryUpdates++;
+                    stats.updated++;
+
+                    processedVariants.add(variant.id);
                 }
-
-                // Check if we've already processed this variant
-                if (processedVariants.has(variant.id)) {
-                    Logger.info(`SKU ${sku}: Skipping duplicate (already processed as different SKU format)`);
-                    stats.skipped++;
-                    continue;
-                }
-
-                if (!originalData) {
-                    Logger.warn(`SKU ${sku} not found in original prices`);
-                    stats.skipped++;
-                    continue;
-                }
-
-                const currentPrice = parseFloat(variant.price);
-                const newPrice = discountData.newPrice;
-                const compareAtPrice = originalData.originalPrice;
-                const newInventory = inventoryItem?.quantity;
-
-                // Skip if no changes needed
-                const priceNeedsUpdate = currentPrice !== newPrice || parseFloat(variant.compareAtPrice || 0) !== compareAtPrice;
-                // Force inventory update if local inventory is 0 (safety stock logic) to ensure products are unavailable
-                const inventoryNeedsUpdate = newInventory !== null && (
-                    newInventory !== variant.currentInventory ||
-                    (newInventory === 0 && variant.currentInventory !== 0)
-                );
-
-                // Log zero inventory enforcement for debugging
-                if (newInventory === 0 && variant.currentInventory !== 0) {
-                    Logger.info(`SKU ${sku}: Forcing zero inventory update (Local: 0, Shopify: ${variant.currentInventory}) - Safety stock enforcement`);
-                }
-
-                if (!priceNeedsUpdate && !inventoryNeedsUpdate) {
-                    Logger.info(`SKU ${sku} (${variant.product.title}): No updates needed (Discount Product)`);
-                    stats.skipped++;
-                    processedVariants.add(variant.id); // Mark as processed
-                    continue;
-                }
-
-                // Update variant
-                await updateVariantPrice(variant, newPrice, compareAtPrice, newInventory, locationId);
-
-                Logger.info(`SKU ${sku} (${variant.product.title}): Updated successfully`);
-
-                if (priceNeedsUpdate) {
-                    stats.priceUpdates++;
-                    stats.discountProducts++;
-                }
-                if (inventoryNeedsUpdate) stats.inventoryUpdates++;
-                stats.updated++;
-
-                // Mark this variant as processed
-                processedVariants.add(variant.id);
 
             } catch (error) {
                 Logger.error(`Error processing discount SKU ${sku}: ${error.message}`);
@@ -1358,37 +1389,45 @@ async function updatePrices() {
 
         // Then, process regular products (not in CSV)
         Logger.section('Processing Regular Products');
-        for (const [sku, variant] of shopifyVariants) {
+        for (const variant of allShopifyVariants) {
             try {
+                const sku = variant.sku;
+                const normalized = normalizeSkuForMatching(sku);
+                const skuKey = normalized.isValid ? normalized.cleaned : sku;
+
                 // Skip if this is a discount product (already processed)
-                if (discountPrices.has(sku)) {
+                if (discountPrices.has(skuKey) || (normalized.isValid && discountPrices.has(normalized.padded))) {
                     continue;
                 }
 
                 // Check if we've already processed this variant
                 if (processedVariants.has(variant.id)) {
-                    continue; // Skip silently for regular products
+                    continue; // Skip silently
                 }
 
                 stats.total++;
-                const originalData = originalPrices.get(sku);
-                const inventoryItem = inventoryData.get(sku);
-
-                if (!originalData) {
-                    Logger.warn(`SKU ${sku} not found in original prices`);
-                    stats.skipped++;
-                    continue;
-                }
+                const originalData = originalPrices.get(skuKey) || (normalized.isValid ? originalPrices.get(normalized.padded) : null);
+                const inventoryItem = inventoryData.get(skuKey) || (normalized.isValid ? inventoryData.get(normalized.padded) : null);
 
                 const currentPrice = parseFloat(variant.price);
-                const newPrice = originalData.originalPrice; // Use Venta1 as the selling price
+                let newPrice = originalData ? originalData.originalPrice : currentPrice;
                 const compareAtPrice = null; // No compare-at price for regular products
                 const newInventory = inventoryItem?.quantity;
 
+                // If originalData is missing, log it but don't skip if inventory needs update
+                if (!originalData) {
+                    if (newInventory !== undefined) {
+                        // Logger.info(`SKU ${sku}: Original price not found, keeping current price ${currentPrice} but checking inventory`);
+                    } else {
+                        // Logger.warn(`SKU ${sku}: No price or inventory data found, skipping`);
+                        stats.skipped++;
+                        continue;
+                    }
+                }
+
                 // Skip if no changes needed
                 const priceNeedsUpdate = currentPrice !== newPrice || variant.compareAtPrice !== null;
-                // Force inventory update if local inventory is 0 (safety stock logic) to ensure products are unavailable
-                const inventoryNeedsUpdate = newInventory !== null && (
+                const inventoryNeedsUpdate = newInventory !== null && newInventory !== undefined && (
                     newInventory !== variant.currentInventory ||
                     (newInventory === 0 && variant.currentInventory !== 0)
                 );
@@ -1399,9 +1438,9 @@ async function updatePrices() {
                 }
 
                 if (!priceNeedsUpdate && !inventoryNeedsUpdate) {
-                    Logger.info(`SKU ${sku} (${variant.product.title}): No updates needed (Regular Product)`);
+                    // Logger.info(`SKU ${sku} (${variant.product.title}): No updates needed (Regular Product)`);
                     stats.skipped++;
-                    processedVariants.add(variant.id); // Mark as processed
+                    processedVariants.add(variant.id);
                     continue;
                 }
 
@@ -1417,11 +1456,10 @@ async function updatePrices() {
                 if (inventoryNeedsUpdate) stats.inventoryUpdates++;
                 stats.updated++;
 
-                // Mark this variant as processed
                 processedVariants.add(variant.id);
 
             } catch (error) {
-                Logger.error(`Error processing regular SKU ${sku}: ${error.message}`);
+                Logger.error(`Error processing variant ID ${variant.id} (SKU: ${variant.sku}): ${error.message}`);
                 stats.errors++;
             }
         }
@@ -1435,23 +1473,29 @@ async function updatePrices() {
         const reservedProductsList = [];
         const onlineProductsList = [];
 
+        const processedSummarySkus = new Set();
         for (const [sku, inventoryInfo] of inventoryData) {
+            // Avoid double-counting (cleaned vs padded)
+            if (processedSummarySkus.has(inventoryInfo.rawSku)) continue;
+            processedSummarySkus.add(inventoryInfo.rawSku);
+
             // Find the corresponding Shopify variant to get product name
-            const variant = shopifyVariants.get(sku);
+            const matchingVariants = shopifyVariants.get(sku) || [];
+            const variant = matchingVariants[0];
             const productName = variant ? variant.product.title : 'Product not found in Shopify';
 
             if (inventoryInfo.actualQuantity <= SAFETY_STOCK_UNITS) {
                 reservedProducts++;
                 totalReservedUnits += inventoryInfo.actualQuantity;
                 reservedProductsList.push({
-                    sku: sku,
+                    sku: inventoryInfo.rawSku, // Use raw SKU for consistency
                     name: productName,
                     quantity: inventoryInfo.actualQuantity
                 });
             } else {
                 onlineProducts++;
                 onlineProductsList.push({
-                    sku: sku,
+                    sku: inventoryInfo.rawSku,
                     name: productName,
                     quantity: inventoryInfo.actualQuantity
                 });
